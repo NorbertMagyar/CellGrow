@@ -34,16 +34,27 @@ except Exception:  # pragma: no cover - fallback only when CuPy is unavailable
 
 ActionRule = Callable[[cp.ndarray, int], cp.ndarray]
 
-DEFAULT_STEPS = 30
+DEFAULT_STEPS = 100
 DEFAULT_SHOW = True
 DEFAULT_COLOR_BY = "order"
-DEFAULT_CROWDING_STAY_THRESHOLD = 3
-DEFAULT_CROWDING_DEATH_THRESHOLD = 50
+DEFAULT_CROWDING_STAY_THRESHOLD = 5
+DEFAULT_CROWDING_DEATH_THRESHOLD = 10
 DEFAULT_NEIGHBORHOOD_RADIUS_FACTOR = 2.5
-DEFAULT_DIVISION_DIRECTION_MODE = "least_resistance"
-DEFAULT_SAVE_MOVIE = False
-DEFAULT_MOVIE_PATH = "cell_growth.mp4"
+DEFAULT_DIVISION_DIRECTION_MODE = "tangential"
+DEFAULT_OUTPUT_STEM = (
+    f"cell_growth_"
+    f"cr_{DEFAULT_CROWDING_STAY_THRESHOLD}_"
+    f"de_{DEFAULT_CROWDING_DEATH_THRESHOLD}_"
+    f"dir_{DEFAULT_DIVISION_DIRECTION_MODE}"
+)
+DEFAULT_SAVE_DATA = True
+DEFAULT_DATA_PATH = f"{DEFAULT_OUTPUT_STEM}.npz"
+DEFAULT_SAVE_SNAPSHOT = True
+DEFAULT_SNAPSHOT_PATH = f"{DEFAULT_OUTPUT_STEM}.png"
+DEFAULT_SAVE_MOVIE = True
+DEFAULT_MOVIE_PATH = f"{DEFAULT_OUTPUT_STEM}.mp4"
 DEFAULT_MOVIE_FPS = 24
+DEFAULT_MOVIE_DURATION_SECONDS: Optional[float] = 10
 DEFAULT_INTERP_FRAMES = 10
 DEFAULT_MOVIE_WIDTH = 1024
 DEFAULT_MOVIE_HEIGHT = 860
@@ -418,7 +429,8 @@ def show_cells_pyvista(
     cmap: str = "viridis",
     notebook: bool = False,
     max_render_cells: Optional[int] = DEFAULT_VIEW_MAX_RENDER_CELLS,
-) -> None:
+    snapshot_path: Optional[str] = None,
+) -> Optional[Path]:
     """
     Visualize cells as sphere glyphs in PyVista.
 
@@ -457,7 +469,8 @@ def show_cells_pyvista(
     )
     spheres = cloud.glyph(geom=base_sphere, scale="scale", orient=False)
 
-    pl = pv.Plotter(notebook=notebook)
+    off_screen = snapshot_path is not None
+    pl = pv.Plotter(notebook=notebook, off_screen=off_screen)
     pl.set_background("white")
 
     if color_by == "radius":
@@ -475,7 +488,17 @@ def show_cells_pyvista(
 
     pl.add_axes()
     pl.show_grid()
+    if snapshot_path is not None:
+        out = Path(snapshot_path)
+        if out.parent and not out.parent.exists():
+            out.parent.mkdir(parents=True, exist_ok=True)
+        pl.screenshot(str(out))
+        pl.close()
+        print(f"Saved snapshot: {out}")
+        return out
+
     pl.show()
+    return None
 
 
 def backend_summary() -> str:
@@ -1681,6 +1704,7 @@ class CellGrowth3D:
         max_render_cells: Optional[int] = DEFAULT_MOVIE_MAX_RENDER_CELLS,
         interp_frames: int = 8,
         fps: int = 24,
+        movie_duration_seconds: Optional[float] = DEFAULT_MOVIE_DURATION_SECONDS,
         show_centers: bool = False,
         color_by: str = "order",
         cmap: str = "viridis",
@@ -1701,6 +1725,7 @@ class CellGrowth3D:
         - stay: source is previous position
         - divide: both daughters start at parent position
         - die: either removed abruptly or animated (fade/shrink), per death_animation
+        If movie_duration_seconds is set, output FPS is auto-scaled to match it.
         Movie rendering uses a fixed camera/bounds from final colony size and
         static-plot style for sphere appearance (color/opacity/tessellation).
         """
@@ -1710,6 +1735,8 @@ class CellGrowth3D:
             raise ValueError("large_interp_frames must be >= 1")
         if fps < 1:
             raise ValueError("fps must be >= 1")
+        if movie_duration_seconds is not None and movie_duration_seconds <= 0:
+            raise ValueError("movie_duration_seconds must be > 0 when provided")
         if sphere_theta < 8 or sphere_phi < 8:
             raise ValueError("sphere_theta and sphere_phi must be >= 8")
         if edge_width < 0:
@@ -1805,6 +1832,32 @@ class CellGrowth3D:
                 f"(max cells/frame={max_frame_cells})."
             )
 
+        planned_frame_count = 1
+        for src, _tgt, *_ in transitions_np:
+            if src.shape[0] == 0:
+                planned_frame_count += 1
+            else:
+                planned_frame_count += int(effective_interp_frames)
+
+        effective_fps = float(fps)
+        if movie_duration_seconds is not None:
+            target_seconds = float(movie_duration_seconds)
+            auto_fps = float(planned_frame_count) / target_seconds
+            if auto_fps < 1.0:
+                print(
+                    "Movie duration request implies FPS < 1.0; clamping to 1.0 "
+                    f"(requested duration={target_seconds:.2f}s, frames={planned_frame_count})."
+                )
+                effective_fps = 1.0
+            else:
+                effective_fps = auto_fps
+            expected_duration = float(planned_frame_count) / effective_fps
+            print(
+                "Movie timing: "
+                f"target={target_seconds:.2f}s, frames={planned_frame_count}, "
+                f"fps={effective_fps:.2f}, expected={expected_duration:.2f}s."
+            )
+
         # Fixed camera based on final colony extent (fallback to initial if empty).
         framing_points = final_points_np if final_points_np.shape[0] > 0 else initial_points_np
         if framing_points.shape[0] > 0:
@@ -1855,7 +1908,7 @@ class CellGrowth3D:
         )
         pl = pv.Plotter(off_screen=True, window_size=(out_w, out_h))
         pl.set_background("white")
-        pl.open_movie(str(out), framerate=fps, macro_block_size=macro_block_size)
+        pl.open_movie(str(out), framerate=effective_fps, macro_block_size=macro_block_size)
         try:
             pl.enable_anti_aliasing()
         except Exception:
@@ -2018,9 +2071,51 @@ class CellGrowth3D:
             return cp.asnumpy(self.points)
         return self.points
 
+    def save_data_npz(self, output_path: str) -> Path:
+        """Save final simulation state to a compressed NPZ file."""
+        out = Path(output_path)
+        if out.parent and not out.parent.exists():
+            out.parent.mkdir(parents=True, exist_ok=True)
+
+        pts = self.points_numpy().astype(np.float32, copy=False)
+        ids = cp.asnumpy(self.cell_ids) if _GPU_ENABLED else np.asarray(self.cell_ids)
+        np.savez_compressed(
+            out,
+            points=pts,
+            cell_ids=ids.astype(np.int64, copy=False),
+            count_history=np.asarray(self.count_history, dtype=np.int32),
+            step_index=np.int32(self.step_index),
+            next_cell_id=np.int64(self._next_cell_id),
+            radius=np.float32(self.radius),
+            split_distance=np.float32(self.split_distance),
+            density_radius=np.float32(self.density_radius),
+            R_sense=np.float32(self.R_sense),
+            grid_cell_size=np.float32(self.grid_cell_size),
+            crowding_stay_threshold=np.int32(self.crowding_stay_threshold),
+            crowding_death_threshold=np.int32(self.crowding_death_threshold),
+            division_direction_mode=np.asarray(self.division_direction_mode),
+            neighbor_weight=np.asarray(self.neighbor_weight),
+            radial_sign=np.asarray(self.radial_sign),
+            dtype=np.asarray(self.dtype),
+        )
+        print(f"Saved data: {out}")
+        return out
+
     def visualize_pyvista(self, **kwargs) -> None:
         """Render final cells as spheres in PyVista."""
         show_cells_pyvista(self.points_numpy(), cell_radius=self.radius, **kwargs)
+
+    def save_snapshot_pyvista(self, output_path: str, **kwargs) -> Path:
+        """Save final cells as a static PyVista snapshot image."""
+        out = show_cells_pyvista(
+            self.points_numpy(),
+            cell_radius=self.radius,
+            snapshot_path=output_path,
+            **kwargs,
+        )
+        if out is None:
+            raise RuntimeError("Snapshot export did not produce an output path.")
+        return out
 
 
 def _build_cli() -> argparse.ArgumentParser:
@@ -2089,6 +2184,30 @@ def _build_cli() -> argparse.ArgumentParser:
         help="Sphere coloring mode in PyVista view (order = list rank oldest->newest)",
     )
     parser.add_argument(
+        "--save-data",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_SAVE_DATA,
+        help="Save final cell state to a compressed NPZ file",
+    )
+    parser.add_argument(
+        "--data-path",
+        type=str,
+        default=DEFAULT_DATA_PATH,
+        help="Output NPZ path for --save-data",
+    )
+    parser.add_argument(
+        "--save-snapshot",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_SAVE_SNAPSHOT,
+        help="Save final PyVista static snapshot as a PNG image",
+    )
+    parser.add_argument(
+        "--snapshot-path",
+        type=str,
+        default=DEFAULT_SNAPSHOT_PATH,
+        help="Output PNG path for --save-snapshot",
+    )
+    parser.add_argument(
         "--save-movie",
         action=argparse.BooleanOptionalAction,
         default=DEFAULT_SAVE_MOVIE,
@@ -2105,6 +2224,15 @@ def _build_cli() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_MOVIE_FPS,
         help="Frames per second for --save-movie",
+    )
+    parser.add_argument(
+        "--movie-duration-seconds",
+        type=float,
+        default=DEFAULT_MOVIE_DURATION_SECONDS,
+        help=(
+            "Target movie duration in seconds; when set, FPS is auto-adjusted "
+            "to match this duration."
+        ),
     )
     parser.add_argument(
         "--interp-frames",
@@ -2226,6 +2354,7 @@ def main() -> None:
             max_render_cells=movie_max_render_cells,
             interp_frames=args.interp_frames,
             fps=args.movie_fps,
+            movie_duration_seconds=args.movie_duration_seconds,
             show_centers=args.show_centers,
             color_by=color_by,
             sphere_theta=args.movie_sphere_theta,
@@ -2239,6 +2368,16 @@ def main() -> None:
         )
     else:
         sim.run(args.steps, log_counts=True, log_timing=args.timing)
+
+    if args.save_data:
+        sim.save_data_npz(args.data_path)
+    if args.save_snapshot:
+        sim.save_snapshot_pyvista(
+            args.snapshot_path,
+            show_centers=args.show_centers,
+            color_by=color_by,
+            max_render_cells=view_max_render_cells,
+        )
 
     print(f"CuPy GPU enabled: {_GPU_ENABLED}")
     print(f"Steps executed: {sim.step_index}")
