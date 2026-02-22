@@ -7,13 +7,14 @@ Model summary:
 - Fission replaces one parent with two daughters.
 - Division direction follows a "least resistance" heuristic:
   repulsive vector away from all other cells.
-- Post-division relaxation uses a local overlap solver with contact distance 2*radius.
+- Post-division relaxation uses a local overlap solver tied to split_distance.
 - Uniform-grid spatial hashing is used as an acceleration structure only.
 """
 
 from __future__ import annotations
 
 import argparse
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -33,7 +34,7 @@ except Exception:  # pragma: no cover - fallback only when CuPy is unavailable
 
 ActionRule = Callable[[cp.ndarray, int], cp.ndarray]
 
-DEFAULT_STEPS = 20
+DEFAULT_STEPS = 50
 DEFAULT_SHOW = True
 DEFAULT_COLOR_BY = "order"
 DEFAULT_SAVE_MOVIE = True
@@ -49,6 +50,269 @@ DEFAULT_MOVIE_EDGE_COLOR = "#202020"
 DEFAULT_MOVIE_EDGE_WIDTH = 0.6
 DEFAULT_MOVIE_MACRO_BLOCK_SIZE = 16
 DEFAULT_MOVIE_DEATH_ANIMATION = "shrink"
+DEFAULT_TIMING = False
+DEFAULT_TIMING_SYNC_GPU = True
+
+GPU_RAW_KERNELS_SRC = r"""
+__device__ inline float maxf_(const float a, const float b) {
+    return a > b ? a : b;
+}
+
+__device__ inline void pseudo_unit_dir(const int i, const int j, float* ux, float* uy, float* uz) {
+    unsigned int h = ((unsigned int)(i + 1) * 73856093u) ^ ((unsigned int)(j + 1) * 19349663u);
+    float x = ((float)(h & 1023u) / 511.5f) - 1.0f;
+    float y = ((float)((h >> 10) & 1023u) / 511.5f) - 1.0f;
+    float z = ((float)((h >> 20) & 1023u) / 511.5f) - 1.0f;
+    float n = sqrtf(x * x + y * y + z * z);
+    if (n < 1e-8f) {
+        x = 1.0f;
+        y = 0.0f;
+        z = 0.0f;
+        n = 1.0f;
+    }
+    *ux = x / n;
+    *uy = y / n;
+    *uz = z / n;
+}
+
+extern "C" __global__
+void neighbor_count_kernel(
+    const float* pos,
+    const long long* sort_idx,
+    const long long* start_lut,
+    const int* count_lut,
+    const float* origin,
+    const long long* min_cell,
+    const long long* max_cell,
+    const float cell_size,
+    const long long stride_x,
+    const long long stride_y,
+    const int span,
+    const float radius2,
+    const int n,
+    int* out_counts
+) {
+    const int i = (int)(blockDim.x * blockIdx.x + threadIdx.x);
+    if (i >= n) return;
+
+    const float xi = pos[3 * i + 0];
+    const float yi = pos[3 * i + 1];
+    const float zi = pos[3 * i + 2];
+
+    const long long cix = (long long)floorf((xi - origin[0]) / cell_size);
+    const long long ciy = (long long)floorf((yi - origin[1]) / cell_size);
+    const long long ciz = (long long)floorf((zi - origin[2]) / cell_size);
+
+    int count = 0;
+    for (int dx = -span; dx <= span; ++dx) {
+        const long long nx = cix + (long long)dx;
+        if (nx < min_cell[0] || nx > max_cell[0]) continue;
+        for (int dy = -span; dy <= span; ++dy) {
+            const long long ny = ciy + (long long)dy;
+            if (ny < min_cell[1] || ny > max_cell[1]) continue;
+            for (int dz = -span; dz <= span; ++dz) {
+                const long long nz = ciz + (long long)dz;
+                if (nz < min_cell[2] || nz > max_cell[2]) continue;
+
+                const long long key = (nx - min_cell[0]) * stride_x + (ny - min_cell[1]) * stride_y + (nz - min_cell[2]);
+                const long long start = start_lut[key];
+                if (start < 0) continue;
+                const int c = count_lut[key];
+                for (int t = 0; t < c; ++t) {
+                    const int j = (int)sort_idx[start + (long long)t];
+                    if (j == i) continue;
+                    const float dx_ = pos[3 * j + 0] - xi;
+                    const float dy_ = pos[3 * j + 1] - yi;
+                    const float dz_ = pos[3 * j + 2] - zi;
+                    const float d2 = dx_ * dx_ + dy_ * dy_ + dz_ * dz_;
+                    if (d2 <= radius2) {
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    out_counts[i] = count;
+}
+
+extern "C" __global__
+void local_resultant_kernel(
+    const float* pos,
+    const long long* sort_idx,
+    const long long* start_lut,
+    const int* count_lut,
+    const float* origin,
+    const long long* min_cell,
+    const long long* max_cell,
+    const float cell_size,
+    const long long stride_x,
+    const long long stride_y,
+    const int span,
+    const float radius,
+    const float radius2,
+    const float sigma,
+    const int weight_mode,
+    const int n,
+    const float eps,
+    float* out_vhat
+) {
+    const int i = (int)(blockDim.x * blockIdx.x + threadIdx.x);
+    if (i >= n) return;
+
+    const float xi = pos[3 * i + 0];
+    const float yi = pos[3 * i + 1];
+    const float zi = pos[3 * i + 2];
+
+    const long long cix = (long long)floorf((xi - origin[0]) / cell_size);
+    const long long ciy = (long long)floorf((yi - origin[1]) / cell_size);
+    const long long ciz = (long long)floorf((zi - origin[2]) / cell_size);
+
+    float vx = 0.0f;
+    float vy = 0.0f;
+    float vz = 0.0f;
+
+    for (int dx = -span; dx <= span; ++dx) {
+        const long long nx = cix + (long long)dx;
+        if (nx < min_cell[0] || nx > max_cell[0]) continue;
+        for (int dy = -span; dy <= span; ++dy) {
+            const long long ny = ciy + (long long)dy;
+            if (ny < min_cell[1] || ny > max_cell[1]) continue;
+            for (int dz = -span; dz <= span; ++dz) {
+                const long long nz = ciz + (long long)dz;
+                if (nz < min_cell[2] || nz > max_cell[2]) continue;
+
+                const long long key = (nx - min_cell[0]) * stride_x + (ny - min_cell[1]) * stride_y + (nz - min_cell[2]);
+                const long long start = start_lut[key];
+                if (start < 0) continue;
+                const int c = count_lut[key];
+                for (int t = 0; t < c; ++t) {
+                    const int j = (int)sort_idx[start + (long long)t];
+                    if (j == i) continue;
+                    const float dx_ = pos[3 * j + 0] - xi;
+                    const float dy_ = pos[3 * j + 1] - yi;
+                    const float dz_ = pos[3 * j + 2] - zi;
+                    const float d2 = dx_ * dx_ + dy_ * dy_ + dz_ * dz_;
+                    if (d2 > radius2) continue;
+
+                    const float r = sqrtf(d2);
+                    float w = 1.0f;
+                    if (weight_mode == 1) {
+                        w = maxf_(0.0f, 1.0f - r / radius);
+                    } else if (weight_mode == 2) {
+                        const float q = r / maxf_(sigma, eps);
+                        w = expf(-(q * q));
+                    }
+                    vx += w * dx_;
+                    vy += w * dy_;
+                    vz += w * dz_;
+                }
+            }
+        }
+    }
+
+    const float vn = sqrtf(vx * vx + vy * vy + vz * vz);
+    if (vn > eps) {
+        out_vhat[3 * i + 0] = vx / vn;
+        out_vhat[3 * i + 1] = vy / vn;
+        out_vhat[3 * i + 2] = vz / vn;
+    } else {
+        out_vhat[3 * i + 0] = 0.0f;
+        out_vhat[3 * i + 1] = 0.0f;
+        out_vhat[3 * i + 2] = 0.0f;
+    }
+}
+
+extern "C" __global__
+void overlap_displacement_kernel(
+    const float* pos,
+    const long long* sort_idx,
+    const long long* start_lut,
+    const int* count_lut,
+    const float* origin,
+    const long long* min_cell,
+    const long long* max_cell,
+    const float cell_size,
+    const long long stride_x,
+    const long long stride_y,
+    const int span,
+    const float candidate_radius2,
+    const float target_min_dist,
+    const float overlap_tol,
+    const float eps,
+    const int n,
+    float* out_disp,
+    int* out_hits
+) {
+    const int i = (int)(blockDim.x * blockIdx.x + threadIdx.x);
+    if (i >= n) return;
+
+    const float xi = pos[3 * i + 0];
+    const float yi = pos[3 * i + 1];
+    const float zi = pos[3 * i + 2];
+
+    const long long cix = (long long)floorf((xi - origin[0]) / cell_size);
+    const long long ciy = (long long)floorf((yi - origin[1]) / cell_size);
+    const long long ciz = (long long)floorf((zi - origin[2]) / cell_size);
+
+    float sx = 0.0f;
+    float sy = 0.0f;
+    float sz = 0.0f;
+    int hits = 0;
+
+    for (int dx = -span; dx <= span; ++dx) {
+        const long long nx = cix + (long long)dx;
+        if (nx < min_cell[0] || nx > max_cell[0]) continue;
+        for (int dy = -span; dy <= span; ++dy) {
+            const long long ny = ciy + (long long)dy;
+            if (ny < min_cell[1] || ny > max_cell[1]) continue;
+            for (int dz = -span; dz <= span; ++dz) {
+                const long long nz = ciz + (long long)dz;
+                if (nz < min_cell[2] || nz > max_cell[2]) continue;
+
+                const long long key = (nx - min_cell[0]) * stride_x + (ny - min_cell[1]) * stride_y + (nz - min_cell[2]);
+                const long long start = start_lut[key];
+                if (start < 0) continue;
+                const int c = count_lut[key];
+                for (int t = 0; t < c; ++t) {
+                    const int j = (int)sort_idx[start + (long long)t];
+                    if (j == i) continue;
+
+                    const float dx_ = xi - pos[3 * j + 0];
+                    const float dy_ = yi - pos[3 * j + 1];
+                    const float dz_ = zi - pos[3 * j + 2];
+                    const float d2 = dx_ * dx_ + dy_ * dy_ + dz_ * dz_;
+                    if (d2 > candidate_radius2) continue;
+
+                    const float d = sqrtf(d2);
+                    if (d >= target_min_dist - overlap_tol) continue;
+
+                    float ux, uy, uz;
+                    if (d > eps) {
+                        const float inv = 1.0f / d;
+                        ux = dx_ * inv;
+                        uy = dy_ * inv;
+                        uz = dz_ * inv;
+                    } else {
+                        pseudo_unit_dir(i, j, &ux, &uy, &uz);
+                    }
+
+                    const float pen = target_min_dist - d;
+                    const float scale = 0.5f * pen;
+                    sx += scale * ux;
+                    sy += scale * uy;
+                    sz += scale * uz;
+                    hits += 1;
+                }
+            }
+        }
+    }
+
+    out_disp[3 * i + 0] = sx;
+    out_disp[3 * i + 1] = sy;
+    out_disp[3 * i + 2] = sz;
+    out_hits[i] = hits;
+}
+"""
 
 
 def show_cells_pyvista(
@@ -165,6 +429,9 @@ class GridStruct:
     stride_y: int
     cell_size: float
     positions: np.ndarray
+    n_cells: int
+    cell_start_lut: Optional[np.ndarray] = None
+    cell_count_lut: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -191,6 +458,8 @@ class CellGrowth3D:
     seed: int = 42
     max_cells: Optional[int] = None
     dtype: str = "float32"
+    enable_step_timing: bool = False
+    sync_timing_gpu: bool = True
 
     def __post_init__(self) -> None:
         if self.radius <= 0:
@@ -239,6 +508,13 @@ class CellGrowth3D:
         self.count_history = [1]
         self._rng = cp.random.RandomState(self.seed)
         self._rng_np = np.random.RandomState(self.seed)
+        self._offset_cache_np: dict[int, np.ndarray] = {}
+        self._offset_cache_cp: dict[int, cp.ndarray] = {}
+        self.last_step_timing: Optional[dict[str, float]] = None
+        self.step_timing_history: list[dict[str, float]] = []
+        self._gpu_kernels_ready = False
+        self._gpu_kernel_error: Optional[str] = None
+        self._init_gpu_kernels()
 
     @staticmethod
     def always_divide_rule(points: cp.ndarray, step: int) -> cp.ndarray:
@@ -250,39 +526,219 @@ class CellGrowth3D:
             return cp.asnumpy(arr)
         return np.asarray(arr)
 
+    def _is_gpu_array(self, arr) -> bool:
+        return bool(_GPU_ENABLED and isinstance(arr, cp.ndarray))
+
+    def _xp_of(self, arr):
+        return cp if self._is_gpu_array(arr) else np
+
+    @staticmethod
+    def _to_float(x) -> float:
+        try:
+            return float(x.item())
+        except Exception:
+            return float(x)
+
+    @staticmethod
+    def _to_int(x) -> int:
+        try:
+            return int(x.item())
+        except Exception:
+            return int(x)
+
+    def _any_true(self, mask, xp_module) -> bool:
+        if xp_module is cp:
+            return bool(mask.any().item())
+        return bool(np.any(mask))
+
+    def _sync_for_timing(self) -> None:
+        if not (_GPU_ENABLED and self.sync_timing_gpu):
+            return
+        try:
+            cp.cuda.Stream.null.synchronize()
+        except Exception:
+            pass
+
+    def _format_step_timing(self, timing: dict[str, float]) -> str:
+        parts = []
+        order = [
+            "rule",
+            "masks",
+            "stay",
+            "divide",
+            "death_anim",
+            "assemble",
+            "overlap",
+            "transition",
+            "commit",
+        ]
+        for key in order:
+            if key in timing:
+                parts.append(f"{key}={timing[key] * 1e3:.2f}ms")
+        details = " | ".join(parts) if parts else "no stage data"
+        step_num = int(timing.get("step", -1))
+        n_before = int(timing.get("n_before", -1))
+        n_after = int(timing.get("n_after", -1))
+        total_ms = timing.get("total", 0.0) * 1e3
+        return (
+            f"Timing step {step_num}: total={total_ms:.2f}ms "
+            f"(cells {n_before}->{n_after}) | {details}"
+        )
+
+    def _init_gpu_kernels(self) -> None:
+        self._gpu_kernels_ready = False
+        self._gpu_kernel_error = None
+        self._kernel_neighbor_count = None
+        self._kernel_local_resultant = None
+        self._kernel_overlap = None
+        if not _GPU_ENABLED:
+            return
+        try:
+            self._kernel_neighbor_count = cp.RawKernel(
+                GPU_RAW_KERNELS_SRC, "neighbor_count_kernel"
+            )
+            self._kernel_local_resultant = cp.RawKernel(
+                GPU_RAW_KERNELS_SRC, "local_resultant_kernel"
+            )
+            self._kernel_overlap = cp.RawKernel(
+                GPU_RAW_KERNELS_SRC, "overlap_displacement_kernel"
+            )
+            self._gpu_kernels_ready = True
+        except Exception as exc:
+            self._gpu_kernel_error = str(exc)
+            self._gpu_kernels_ready = False
+
+    def _gpu_fast_path_available(self, arr) -> bool:
+        if not _GPU_ENABLED:
+            return False
+        if not self._is_gpu_array(arr):
+            return False
+        if not getattr(self, "_gpu_kernels_ready", False):
+            return False
+        return bool(arr.dtype == cp.float32)
+
+    def _disable_gpu_kernels(self, exc: Exception) -> None:
+        self._gpu_kernels_ready = False
+        self._gpu_kernel_error = str(exc)
+        self._kernel_neighbor_count = None
+        self._kernel_local_resultant = None
+        self._kernel_overlap = None
+        print(f"GPU raw kernels disabled at runtime, falling back: {exc}")
+
+    @staticmethod
+    def _launch_cfg_1d(n: int, threads: int = 128) -> tuple[tuple[int], tuple[int]]:
+        blocks = max(1, (int(n) + threads - 1) // threads)
+        return (blocks,), (threads,)
+
+    def _ensure_grid_lookup(self, grid: GridStruct, xp_module):
+        if grid.cell_start_lut is not None and grid.cell_count_lut is not None:
+            return grid.cell_start_lut, grid.cell_count_lut
+
+        n_cells = int(grid.n_cells)
+        start_lut = xp_module.full((n_cells,), -1, dtype=xp_module.int64)
+        count_lut = xp_module.zeros((n_cells,), dtype=xp_module.int32)
+        if grid.unique_keys.size > 0:
+            start_lut[grid.unique_keys] = grid.start_idx.astype(xp_module.int64, copy=False)
+            count_lut[grid.unique_keys] = grid.counts.astype(xp_module.int32, copy=False)
+
+        grid.cell_start_lut = start_lut
+        grid.cell_count_lut = count_lut
+        return start_lut, count_lut
+
+    def _neighbor_offsets(self, span: int, xp_module):
+        if xp_module is cp:
+            cached = self._offset_cache_cp.get(span)
+            if cached is not None:
+                return cached
+            vals = np.arange(-span, span + 1, dtype=np.int64)
+            off_np = np.stack(np.meshgrid(vals, vals, vals, indexing="ij"), axis=-1).reshape(-1, 3)
+            off_cp = cp.asarray(off_np)
+            self._offset_cache_cp[span] = off_cp
+            return off_cp
+
+        cached = self._offset_cache_np.get(span)
+        if cached is not None:
+            return cached
+        vals = np.arange(-span, span + 1, dtype=np.int64)
+        off = np.stack(np.meshgrid(vals, vals, vals, indexing="ij"), axis=-1).reshape(-1, 3)
+        self._offset_cache_np[span] = off
+        return off
+
+    def _expand_cell_ranges(self, starts, counts, xp_module):
+        total = self._to_int(counts.sum())
+        if total <= 0:
+            return xp_module.zeros((0,), dtype=xp_module.int64)
+
+        try:
+            prefix = xp_module.cumsum(counts) - counts
+            return (
+                xp_module.repeat(starts, counts)
+                + xp_module.arange(total, dtype=xp_module.int64)
+                - xp_module.repeat(prefix, counts)
+            )
+        except Exception:
+            chunks = []
+            n_ranges = self._to_int(starts.shape[0])
+            for idx in range(n_ranges):
+                start = self._to_int(starts[idx])
+                count = self._to_int(counts[idx])
+                if count > 0:
+                    chunks.append(xp_module.arange(start, start + count, dtype=xp_module.int64))
+            if not chunks:
+                return xp_module.zeros((0,), dtype=xp_module.int64)
+            return xp_module.concatenate(chunks, axis=0)
+
     def _random_unit_vectors_np(self, n: int) -> np.ndarray:
         vec = self._rng_np.normal(0.0, 1.0, size=(n, 3)).astype(float, copy=False)
         norm = np.linalg.norm(vec, axis=1, keepdims=True)
         return vec / np.maximum(norm, self.eps)
 
-    def _point_to_cell_coord(self, point: np.ndarray, origin: np.ndarray) -> np.ndarray:
-        rel = (point - origin) / float(self.grid_cell_size)
-        return np.floor(rel).astype(np.int64, copy=False)
+    def _random_unit_vectors_backend(self, n: int, xp_module, dtype):
+        if n <= 0:
+            return xp_module.zeros((0, 3), dtype=dtype)
+        if xp_module is cp:
+            vec = self._rng.normal(0.0, 1.0, size=(n, 3)).astype(dtype, copy=False)
+            norm = cp.linalg.norm(vec, axis=1, keepdims=True)
+            return vec / cp.maximum(norm, self.eps)
+        vec = self._rng_np.normal(0.0, 1.0, size=(n, 3)).astype(dtype, copy=False)
+        norm = np.linalg.norm(vec, axis=1, keepdims=True)
+        return vec / np.maximum(norm, self.eps)
 
-    def _cell_key(self, cell_coord: np.ndarray, grid: GridStruct) -> Optional[int]:
+    def _point_to_cell_coord(self, point, origin, cell_size: Optional[float] = None):
+        xp_module = self._xp_of(point)
+        use_cell_size = float(self.grid_cell_size if cell_size is None else cell_size)
+        rel = (point - origin) / use_cell_size
+        return xp_module.floor(rel).astype(xp_module.int64, copy=False)
+
+    def _cell_key(self, cell_coord, grid: GridStruct) -> Optional[int]:
         """
         Convert integer cell coordinate to packed key used by the sorted index.
 
         Grid is acceleration only; positions are continuous and no quantization
         is applied to geometry beyond candidate lookup.
         """
-        if np.any(cell_coord < grid.min_cell) or np.any(cell_coord > grid.max_cell):
+        xp_module = self._xp_of(cell_coord)
+        if self._any_true(cell_coord < grid.min_cell, xp_module) or self._any_true(
+            cell_coord > grid.max_cell, xp_module
+        ):
             return None
         off = cell_coord - grid.min_cell
-        key = int(off[0] * grid.stride_x + off[1] * grid.stride_y + off[2])
+        key = self._to_int(off[0] * grid.stride_x + off[1] * grid.stride_y + off[2])
         return key
 
-    def _build_grid(self, positions: np.ndarray) -> GridStruct:
+    def _build_grid(self, positions, cell_size: Optional[float] = None) -> GridStruct:
         """
         Build a uniform-grid spatial hash:
         (origin, keys_sorted, sort_idx, unique_keys, start_idx, counts, positions_sorted).
         """
+        xp_module = self._xp_of(positions)
+        use_cell_size = float(self.grid_cell_size if cell_size is None else cell_size)
         n = positions.shape[0]
         if n == 0:
-            zeros_i = np.zeros((0,), dtype=np.int64)
-            zeros_p = np.zeros((0, 3), dtype=float)
-            z3 = np.zeros(3, dtype=np.int64)
-            origin = np.zeros(3, dtype=float)
+            zeros_i = xp_module.zeros((0,), dtype=xp_module.int64)
+            zeros_p = xp_module.zeros((0, 3), dtype=float)
+            z3 = xp_module.zeros(3, dtype=xp_module.int64)
+            origin = xp_module.zeros(3, dtype=float)
             return GridStruct(
                 origin=origin,
                 keys_sorted=zeros_i,
@@ -295,25 +751,29 @@ class CellGrowth3D:
                 max_cell=z3.copy(),
                 stride_x=1,
                 stride_y=1,
-                cell_size=float(self.grid_cell_size),
+                cell_size=use_cell_size,
                 positions=zeros_p,
+                n_cells=0,
             )
 
-        pos = np.asarray(positions, dtype=float)
+        pos = positions.astype(self.dtype, copy=False)
         origin = pos.min(axis=0)
-        cell_coords = np.floor((pos - origin) / float(self.grid_cell_size)).astype(np.int64)
+        cell_coords = xp_module.floor((pos - origin) / use_cell_size).astype(
+            xp_module.int64
+        )
         min_cell = cell_coords.min(axis=0)
         max_cell = cell_coords.max(axis=0)
         off = cell_coords - min_cell
-        ranges = (max_cell - min_cell + 1).astype(np.int64)
-        stride_y = int(ranges[2])
-        stride_x = int(ranges[1] * ranges[2])
+        ranges = (max_cell - min_cell + 1).astype(xp_module.int64)
+        stride_y = self._to_int(ranges[2])
+        stride_x = self._to_int(ranges[1] * ranges[2])
+        n_cells = self._to_int(ranges[0] * ranges[1] * ranges[2])
         keys = off[:, 0] * stride_x + off[:, 1] * stride_y + off[:, 2]
 
-        sort_idx = np.argsort(keys, kind="mergesort")
+        sort_idx = xp_module.argsort(keys)
         keys_sorted = keys[sort_idx]
         positions_sorted = pos[sort_idx]
-        unique_keys, start_idx, counts = np.unique(
+        unique_keys, start_idx, counts = xp_module.unique(
             keys_sorted,
             return_index=True,
             return_counts=True,
@@ -321,93 +781,113 @@ class CellGrowth3D:
 
         return GridStruct(
             origin=origin,
-            keys_sorted=keys_sorted.astype(np.int64, copy=False),
-            sort_idx=sort_idx.astype(np.int64, copy=False),
-            unique_keys=unique_keys.astype(np.int64, copy=False),
-            start_idx=start_idx.astype(np.int64, copy=False),
-            counts=counts.astype(np.int64, copy=False),
+            keys_sorted=keys_sorted.astype(xp_module.int64, copy=False),
+            sort_idx=sort_idx.astype(xp_module.int64, copy=False),
+            unique_keys=unique_keys.astype(xp_module.int64, copy=False),
+            start_idx=start_idx.astype(xp_module.int64, copy=False),
+            counts=counts.astype(xp_module.int64, copy=False),
             positions_sorted=positions_sorted,
             min_cell=min_cell,
             max_cell=max_cell,
             stride_x=stride_x,
             stride_y=stride_y,
-            cell_size=float(self.grid_cell_size),
+            cell_size=use_cell_size,
             positions=pos,
+            n_cells=n_cells,
         )
 
     def _neighbor_data_within_radius(
         self,
         i: int,
-        positions: np.ndarray,
+        positions,
         grid: GridStruct,
         radius: float,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ):
         """
         Return neighbor ids, exact displacement vectors (x_j - x_i), and distances.
         Candidate cells come from neighboring bins around particle i;
         filtering is exact Euclidean.
         """
+        xp_module = self._xp_of(positions)
         if positions.shape[0] <= 1:
-            empty_i = np.zeros((0,), dtype=np.int64)
-            empty_v = np.zeros((0, 3), dtype=float)
-            empty_d = np.zeros((0,), dtype=float)
+            empty_i = xp_module.zeros((0,), dtype=xp_module.int64)
+            empty_v = xp_module.zeros((0, 3), dtype=float)
+            empty_d = xp_module.zeros((0,), dtype=float)
             return empty_i, empty_v, empty_d
 
         p_i = positions[i]
-        cell_i = self._point_to_cell_coord(p_i, grid.origin)
-        candidates: list[np.ndarray] = []
-
+        cell_i = self._point_to_cell_coord(p_i, grid.origin, grid.cell_size)
         span = max(1, int(np.ceil(float(radius) / max(grid.cell_size, self.eps))))
-        for dx in range(-span, span + 1):
-            for dy in range(-span, span + 1):
-                for dz in range(-span, span + 1):
-                    n_cell = cell_i + np.asarray([dx, dy, dz], dtype=np.int64)
-                    key = self._cell_key(n_cell, grid)
-                    if key is None:
-                        continue
-                    pos = np.searchsorted(grid.unique_keys, key)
-                    if pos >= grid.unique_keys.shape[0] or grid.unique_keys[pos] != key:
-                        continue
-                    start = int(grid.start_idx[pos])
-                    end = start + int(grid.counts[pos])
-                    if end > start:
-                        candidates.append(grid.sort_idx[start:end])
 
-        if not candidates:
-            empty_i = np.zeros((0,), dtype=np.int64)
-            empty_v = np.zeros((0, 3), dtype=float)
-            empty_d = np.zeros((0,), dtype=float)
+        offsets = self._neighbor_offsets(span, xp_module)
+        n_cells = cell_i[None, :] + offsets
+        in_bounds = ((n_cells >= grid.min_cell[None, :]) & (n_cells <= grid.max_cell[None, :])).all(
+            axis=1
+        )
+        if not self._any_true(in_bounds, xp_module):
+            empty_i = xp_module.zeros((0,), dtype=xp_module.int64)
+            empty_v = xp_module.zeros((0, 3), dtype=float)
+            empty_d = xp_module.zeros((0,), dtype=float)
             return empty_i, empty_v, empty_d
 
-        cand = np.concatenate(candidates, axis=0)
+        valid_cells = n_cells[in_bounds]
+        off = valid_cells - grid.min_cell[None, :]
+        keys = off[:, 0] * grid.stride_x + off[:, 1] * grid.stride_y + off[:, 2]
+        key_pos = xp_module.searchsorted(grid.unique_keys, keys)
+        valid_pos = key_pos < grid.unique_keys.shape[0]
+        if not self._any_true(valid_pos, xp_module):
+            empty_i = xp_module.zeros((0,), dtype=xp_module.int64)
+            empty_v = xp_module.zeros((0, 3), dtype=float)
+            empty_d = xp_module.zeros((0,), dtype=float)
+            return empty_i, empty_v, empty_d
+
+        keys = keys[valid_pos]
+        key_pos = key_pos[valid_pos]
+        hits = grid.unique_keys[key_pos] == keys
+        if not self._any_true(hits, xp_module):
+            empty_i = xp_module.zeros((0,), dtype=xp_module.int64)
+            empty_v = xp_module.zeros((0, 3), dtype=float)
+            empty_d = xp_module.zeros((0,), dtype=float)
+            return empty_i, empty_v, empty_d
+
+        key_pos = key_pos[hits]
+        starts = grid.start_idx[key_pos].astype(xp_module.int64, copy=False)
+        counts = grid.counts[key_pos].astype(xp_module.int64, copy=False)
+        idx_sorted = self._expand_cell_ranges(starts, counts, xp_module)
+        if idx_sorted.size == 0:
+            empty_i = xp_module.zeros((0,), dtype=xp_module.int64)
+            empty_v = xp_module.zeros((0, 3), dtype=float)
+            empty_d = xp_module.zeros((0,), dtype=float)
+            return empty_i, empty_v, empty_d
+        cand = grid.sort_idx[idx_sorted]
         cand = cand[cand != i]
         if cand.size == 0:
-            empty_i = np.zeros((0,), dtype=np.int64)
-            empty_v = np.zeros((0, 3), dtype=float)
-            empty_d = np.zeros((0,), dtype=float)
+            empty_i = xp_module.zeros((0,), dtype=xp_module.int64)
+            empty_v = xp_module.zeros((0, 3), dtype=float)
+            empty_d = xp_module.zeros((0,), dtype=float)
             return empty_i, empty_v, empty_d
 
         vecs = positions[cand] - p_i
-        dist2 = np.einsum("ij,ij->i", vecs, vecs)
+        dist2 = xp_module.sum(vecs * vecs, axis=1)
         mask = dist2 <= float(radius * radius)
-        if not np.any(mask):
-            empty_i = np.zeros((0,), dtype=np.int64)
-            empty_v = np.zeros((0, 3), dtype=float)
-            empty_d = np.zeros((0,), dtype=float)
+        if not self._any_true(mask, xp_module):
+            empty_i = xp_module.zeros((0,), dtype=xp_module.int64)
+            empty_v = xp_module.zeros((0, 3), dtype=float)
+            empty_d = xp_module.zeros((0,), dtype=float)
             return empty_i, empty_v, empty_d
 
         cand = cand[mask]
         vecs = vecs[mask]
-        dists = np.sqrt(dist2[mask])
-        return cand.astype(np.int64, copy=False), vecs, dists
+        dists = xp_module.sqrt(dist2[mask])
+        return cand.astype(xp_module.int64, copy=False), vecs, dists
 
     def _neighbors_within_radius(
         self,
         i: int,
-        positions: np.ndarray,
+        positions,
         grid: GridStruct,
         radius: float,
-    ) -> np.ndarray:
+    ):
         ids, _, _ = self._neighbor_data_within_radius(i, positions, grid, radius)
         return ids
 
@@ -426,35 +906,103 @@ class CellGrowth3D:
 
     def _neighbor_counts_within(self, points: cp.ndarray, radius: float) -> cp.ndarray:
         """Count neighbors within fixed radius (self excluded), grid-accelerated."""
+        xp_module = self._xp_of(points)
         n = points.shape[0]
         if n <= 1:
-            return cp.zeros((n,), dtype=cp.int32)
+            return xp_module.zeros((n,), dtype=xp_module.int32)
         if not self.fast_neighbors:
             return self._neighbor_counts_within_slow(points, radius)
 
-        pos_np = self._as_numpy(points)
-        grid = self._build_grid(pos_np)
-        counts = np.zeros(n, dtype=np.int32)
+        if self._gpu_fast_path_available(points):
+            try:
+                grid = self._build_grid(points)
+                start_lut, count_lut = self._ensure_grid_lookup(grid, cp)
+                counts = cp.zeros((n,), dtype=cp.int32)
+                span = max(1, int(np.ceil(float(radius) / max(grid.cell_size, self.eps))))
+                blocks, threads = self._launch_cfg_1d(n)
+                self._kernel_neighbor_count(
+                    blocks,
+                    threads,
+                    (
+                        points,
+                        grid.sort_idx,
+                        start_lut,
+                        count_lut,
+                        grid.origin,
+                        grid.min_cell,
+                        grid.max_cell,
+                        np.float32(grid.cell_size),
+                        np.int64(grid.stride_x),
+                        np.int64(grid.stride_y),
+                        np.int32(span),
+                        np.float32(radius * radius),
+                        np.int32(n),
+                        counts,
+                    ),
+                )
+                return counts
+            except Exception as exc:
+                self._disable_gpu_kernels(exc)
+
+        grid = self._build_grid(points)
+        counts = xp_module.zeros(n, dtype=xp_module.int32)
         for i in range(n):
-            ids = self._neighbors_within_radius(i, pos_np, grid, radius)
+            ids = self._neighbors_within_radius(i, points, grid, radius)
             counts[i] = ids.shape[0]
-        return cp.asarray(counts, dtype=cp.int32)
+        return counts.astype(xp_module.int32, copy=False)
 
     def _local_neighbor_resultants(
         self,
-        positions: np.ndarray,
+        positions,
         grid: GridStruct,
         radius: float,
         weight_mode: str,
-    ) -> np.ndarray:
+    ):
         """
         Compute v_hat(i) from local neighbors using exact distances.
         No direction quantization is introduced.
         """
+        xp_module = self._xp_of(positions)
         n = positions.shape[0]
-        v_hat = np.zeros((n, 3), dtype=float)
+        v_hat = xp_module.zeros((n, 3), dtype=float)
         if n == 0:
             return v_hat
+
+        if self._gpu_fast_path_available(positions):
+            try:
+                start_lut, count_lut = self._ensure_grid_lookup(grid, cp)
+                out = cp.zeros((n, 3), dtype=positions.dtype)
+                span = max(1, int(np.ceil(float(radius) / max(grid.cell_size, self.eps))))
+                weight_mode_id = {"uniform": 0, "linear": 1, "gaussian": 2}[weight_mode]
+                sigma = float(0.5 * radius)
+                blocks, threads = self._launch_cfg_1d(n)
+                self._kernel_local_resultant(
+                    blocks,
+                    threads,
+                    (
+                        positions,
+                        grid.sort_idx,
+                        start_lut,
+                        count_lut,
+                        grid.origin,
+                        grid.min_cell,
+                        grid.max_cell,
+                        np.float32(grid.cell_size),
+                        np.int64(grid.stride_x),
+                        np.int64(grid.stride_y),
+                        np.int32(span),
+                        np.float32(radius),
+                        np.float32(radius * radius),
+                        np.float32(sigma),
+                        np.int32(weight_mode_id),
+                        np.int32(n),
+                        np.float32(self.eps),
+                        out,
+                    ),
+                )
+                return out
+            except Exception as exc:
+                self._disable_gpu_kernels(exc)
 
         sigma = 0.5 * radius
         for i in range(n):
@@ -462,24 +1010,25 @@ class CellGrowth3D:
             if dists.size == 0:
                 continue
             if weight_mode == "uniform":
-                w = np.ones_like(dists)
+                w = xp_module.ones_like(dists)
             elif weight_mode == "linear":
-                w = np.maximum(0.0, 1.0 - dists / radius)
+                w = xp_module.maximum(0.0, 1.0 - dists / radius)
             elif weight_mode == "gaussian":
-                w = np.exp(-((dists / max(sigma, self.eps)) ** 2))
+                w = xp_module.exp(-((dists / max(sigma, self.eps)) ** 2))
             else:
                 raise ValueError("Unknown neighbor weight mode.")
 
             v = (w[:, None] * vecs).sum(axis=0)
-            vn = float(np.linalg.norm(v))
+            vn = self._to_float(xp_module.sqrt(xp_module.sum(v * v)))
             if vn > self.eps:
                 v_hat[i] = v / vn
         return v_hat
 
-    def _division_dirs_from_vhat(self, v_hat: np.ndarray) -> np.ndarray:
+    def _division_dirs_from_vhat(self, v_hat):
+        xp_module = self._xp_of(v_hat)
         n = v_hat.shape[0]
-        dirs = np.zeros((n, 3), dtype=float)
-        norms = np.linalg.norm(v_hat, axis=1)
+        dirs = xp_module.zeros((n, 3), dtype=float)
+        norms = xp_module.sqrt(xp_module.sum(v_hat * v_hat, axis=1))
         tiny = norms <= self.eps
 
         if self.division_direction_mode == "radial":
@@ -487,41 +1036,50 @@ class CellGrowth3D:
             if self.radial_sign == "inward":
                 base *= -1.0
             elif self.radial_sign == "random":
-                s = self._rng_np.choice(np.asarray([-1.0, 1.0], dtype=float), size=n)
+                if xp_module is cp:
+                    s = xp_module.where(
+                        self._rng.random_sample(n) < 0.5,
+                        -1.0,
+                        1.0,
+                    )
+                else:
+                    s = self._rng_np.choice(np.asarray([-1.0, 1.0], dtype=float), size=n)
                 base *= s[:, None]
             dirs = base
-            if np.any(~tiny):
-                dirs[~tiny] /= np.maximum(norms[~tiny, None], self.eps)
+            if self._any_true(~tiny, xp_module):
+                dirs[~tiny] /= xp_module.maximum(norms[~tiny, None], self.eps)
         elif self.division_direction_mode == "tangential":
-            for i in range(n):
-                vi = v_hat[i]
-                vn = float(np.linalg.norm(vi))
-                if vn <= self.eps:
-                    continue
-                vi = vi / vn
-                found = False
-                for _ in range(3):
-                    u = self._random_unit_vectors_np(1)[0]
-                    d = np.cross(vi, u)
-                    dn = float(np.linalg.norm(d))
-                    if dn > self.eps:
-                        dirs[i] = d / dn
-                        found = True
-                        break
-                if not found:
-                    axis = np.asarray([1.0, 0.0, 0.0], dtype=float)
-                    if abs(float(np.dot(vi, axis))) > 0.9:
-                        axis = np.asarray([0.0, 1.0, 0.0], dtype=float)
-                    d = np.cross(vi, axis)
-                    dn = float(np.linalg.norm(d))
-                    if dn > self.eps:
-                        dirs[i] = d / dn
+            u = self._random_unit_vectors_backend(n, xp_module, v_hat.dtype)
+            d = xp_module.cross(v_hat, u)
+            dn = xp_module.sqrt(xp_module.sum(d * d, axis=1))
+            good = dn > self.eps
+            if self._any_true(good, xp_module):
+                dirs[good] = d[good] / xp_module.maximum(dn[good, None], self.eps)
 
-        if np.any(tiny):
-            dirs[tiny] = self._random_unit_vectors_np(int(np.sum(tiny)))
+            unresolved = (~good) & (~tiny)
+            if self._any_true(unresolved, xp_module):
+                idx = xp_module.where(unresolved)[0]
+                v = v_hat[idx]
+                axis = xp_module.zeros_like(v)
+                axis[:, 0] = 1.0
+                vnorm = xp_module.sqrt(xp_module.sum(v * v, axis=1))
+                use_y = xp_module.abs(v[:, 0]) > 0.9 * xp_module.maximum(vnorm, self.eps)
+                axis[use_y, 0] = 0.0
+                axis[use_y, 1] = 1.0
+                d2 = xp_module.cross(v, axis)
+                dn2 = xp_module.sqrt(xp_module.sum(d2 * d2, axis=1))
+                good2 = dn2 > self.eps
+                if self._any_true(good2, xp_module):
+                    idx_good = idx[good2]
+                    dirs[idx_good] = d2[good2] / xp_module.maximum(dn2[good2, None], self.eps)
 
-        dn = np.linalg.norm(dirs, axis=1, keepdims=True)
-        dirs = dirs / np.maximum(dn, self.eps)
+        dn = xp_module.sqrt(xp_module.sum(dirs * dirs, axis=1, keepdims=True))
+        need_fallback = dn[:, 0] <= self.eps
+        if self._any_true(need_fallback, xp_module):
+            n_fallback = self._to_int(need_fallback.sum())
+            dirs[need_fallback] = self._random_unit_vectors_backend(n_fallback, xp_module, dirs.dtype)
+            dn = xp_module.sqrt(xp_module.sum(dirs * dirs, axis=1, keepdims=True))
+        dirs = dirs / xp_module.maximum(dn, self.eps)
         return dirs
 
     def density_regulated_rule(self, points: cp.ndarray, step: int) -> cp.ndarray:
@@ -584,18 +1142,59 @@ class CellGrowth3D:
 
         # Keep relaxation target consistent with fission spacing.
         target_min_dist = float(max(self.split_distance, 1.0 * self.radius))
-        candidate_radius = float(
-            max(self.overlap_cutoff, target_min_dist * (1.0 + self.overlap_margin))
-        )
-        pos_np = self._as_numpy(pts).astype(float, copy=True)
+        candidate_radius = float(target_min_dist * (1.0 + self.overlap_margin))
+        overlap_cell_size = float(max(self.eps, min(self.grid_cell_size, candidate_radius)))
+        xp_module = self._xp_of(pts)
+        pos = pts.astype(self.dtype, copy=True)
+
+        if self._gpu_fast_path_available(pos):
+            try:
+                span = max(1, int(np.ceil(candidate_radius / max(overlap_cell_size, self.eps))))
+                blocks, threads = self._launch_cfg_1d(n)
+                for _ in range(max(1, self.overlap_relax_iters)):
+                    grid = self._build_grid(pos, cell_size=overlap_cell_size)
+                    start_lut, count_lut = self._ensure_grid_lookup(grid, cp)
+                    disp = cp.zeros_like(pos)
+                    hits = cp.zeros((n,), dtype=cp.int32)
+                    self._kernel_overlap(
+                        blocks,
+                        threads,
+                        (
+                            pos,
+                            grid.sort_idx,
+                            start_lut,
+                            count_lut,
+                            grid.origin,
+                            grid.min_cell,
+                            grid.max_cell,
+                            np.float32(grid.cell_size),
+                            np.int64(grid.stride_x),
+                            np.int64(grid.stride_y),
+                            np.int32(span),
+                            np.float32(candidate_radius * candidate_radius),
+                            np.float32(target_min_dist),
+                            np.float32(self.overlap_tol),
+                            np.float32(self.eps),
+                            np.int32(n),
+                            disp,
+                            hits,
+                        ),
+                    )
+                    if not bool(cp.any(hits > 0).item()):
+                        break
+                    pos += disp
+                return pos.astype(self.dtype, copy=False)
+            except Exception as exc:
+                self._disable_gpu_kernels(exc)
 
         for _ in range(max(1, self.overlap_relax_iters)):
             moved = False
-            grid = self._build_grid(pos_np)
+            grid = self._build_grid(pos, cell_size=overlap_cell_size)
+            disp = xp_module.zeros_like(pos)
             for i in range(n):
                 nbr_ids, vecs, dists = self._neighbor_data_within_radius(
                     i,
-                    pos_np,
+                    pos,
                     grid,
                     candidate_radius,
                 )
@@ -604,49 +1203,80 @@ class CellGrowth3D:
 
                 # Process each pair once.
                 mask = nbr_ids > i
-                if not np.any(mask):
+                if not self._any_true(mask, xp_module):
                     continue
                 nbr_ids = nbr_ids[mask]
                 vecs = vecs[mask]
                 dists = dists[mask]
 
-                for k, j in enumerate(nbr_ids):
-                    dist = float(dists[k])
-                    if dist >= target_min_dist - self.overlap_tol:
-                        continue
-                    penetration = target_min_dist - dist
-                    if dist <= self.eps:
-                        direction = self._random_unit_vectors_np(1)[0]
-                    else:
-                        # vec = x_j - x_i, so repulsive unit from j to i is -vec/|vec|
-                        direction = -vecs[k] / max(dist, self.eps)
+                overlap_mask = dists < (target_min_dist - self.overlap_tol)
+                if not self._any_true(overlap_mask, xp_module):
+                    continue
 
-                    shift = 0.5 * penetration * direction
-                    ji = int(j)
-                    pos_np[i] += shift
-                    pos_np[ji] -= shift
-                    moved = True
+                moved = True
+                nbr_ids = nbr_ids[overlap_mask]
+                vecs = vecs[overlap_mask]
+                dists = dists[overlap_mask]
+
+                dirs = xp_module.zeros_like(vecs)
+                nz = dists > self.eps
+                if self._any_true(nz, xp_module):
+                    dirs[nz] = -vecs[nz] / dists[nz, None]
+                z = ~nz
+                if self._any_true(z, xp_module):
+                    z_count = self._to_int(z.sum())
+                    dirs[z] = self._random_unit_vectors_backend(z_count, xp_module, pos.dtype)
+
+                penetration = target_min_dist - dists
+                shifts = 0.5 * penetration[:, None] * dirs
+                disp[i] += shifts.sum(axis=0)
+                for axis in range(3):
+                    xp_module.add.at(disp[:, axis], nbr_ids, -shifts[:, axis])
 
             if not moved:
                 break
+            pos += disp
 
-        return cp.asarray(pos_np, dtype=self.dtype)
+        return pos.astype(self.dtype, copy=False)
 
     def _step_internal(
         self,
         action_rule: Optional[ActionRule] = None,
         return_transition: bool = False,
         death_animation: str = "none",
+        profile_timing: bool = False,
     ) -> tuple[cp.ndarray, Optional[StepTransition]]:
         """Core step logic with optional source->target transition capture."""
         valid_death_modes = {"none", "fade", "shrink", "fade_shrink"}
         if death_animation not in valid_death_modes:
             raise ValueError(f"death_animation must be one of {sorted(valid_death_modes)}")
 
+        timing_enabled = bool(profile_timing or self.enable_step_timing)
+        timing: dict[str, float] = {}
+        t_prev = 0.0
+        t_total_start = 0.0
+        step_number = int(self.step_index + 1)
+        n_before = int(self.points.shape[0])
+
+        def mark(label: str) -> None:
+            nonlocal t_prev
+            if not timing_enabled:
+                return
+            self._sync_for_timing()
+            now = time.perf_counter()
+            timing[label] = timing.get(label, 0.0) + (now - t_prev)
+            t_prev = now
+
+        if timing_enabled:
+            self._sync_for_timing()
+            t_total_start = time.perf_counter()
+            t_prev = t_total_start
+
         rule = action_rule or self.density_regulated_rule
         actions = rule(self.points, self.step_index)
         if actions.shape != (self.points.shape[0],):
             raise ValueError("Action rule must return a vector shaped (n_cells,)")
+        mark("rule")
 
         divide_mask = actions == 1
         stay_mask = actions == 0
@@ -654,6 +1284,7 @@ class CellGrowth3D:
 
         if bool(cp.any((~divide_mask) & (~stay_mask) & (~die_mask))):
             raise ValueError("Actions must only contain -1, 0, or 1.")
+        mark("masks")
 
         next_blocks = []
         next_id_blocks = []
@@ -684,21 +1315,21 @@ class CellGrowth3D:
                 target_size_blocks.append(cp.full(n_stay, one_f, dtype=self.dtype))
                 source_alpha_blocks.append(cp.full(n_stay, one_f, dtype=self.dtype))
                 target_alpha_blocks.append(cp.full(n_stay, one_f, dtype=self.dtype))
+        mark("stay")
 
         if bool(cp.any(divide_mask)):
             if self.division_direction_mode == "least_resistance":
                 # NOTE: kept for baseline behavior; this remains all-pairs and slow.
                 dirs_all = self._least_resistance_directions()
             else:
-                pos_np = self._as_numpy(self.points)
-                grid = self._build_grid(pos_np)
+                grid = self._build_grid(self.points)
                 v_hat = self._local_neighbor_resultants(
-                    pos_np,
+                    self.points,
                     grid,
                     float(self.R_sense),
                     self.neighbor_weight,
                 )
-                dirs_all = cp.asarray(self._division_dirs_from_vhat(v_hat), dtype=self.dtype)
+                dirs_all = self._division_dirs_from_vhat(v_hat).astype(self.dtype, copy=False)
 
             dirs = dirs_all[divide_mask]
             parents = self.points[divide_mask]
@@ -739,6 +1370,7 @@ class CellGrowth3D:
                 target_alpha_blocks.extend(
                     [cp.full(n_div, one_f, dtype=self.dtype), cp.full(n_div, one_f, dtype=self.dtype)]
                 )
+        mark("divide")
 
         if return_transition and death_animation != "none" and bool(cp.any(die_mask)):
             dead_points = self.points[die_mask]
@@ -757,15 +1389,26 @@ class CellGrowth3D:
             target_size_blocks.append(cp.full(n_dead, target_size, dtype=self.dtype))
             source_alpha_blocks.append(cp.full(n_dead, one_f, dtype=self.dtype))
             target_alpha_blocks.append(cp.full(n_dead, target_alpha, dtype=self.dtype))
+        mark("death_anim")
 
         if next_blocks:
             next_points = cp.concatenate(next_blocks, axis=0)
             next_ids = cp.concatenate(next_id_blocks, axis=0)
+            mark("assemble")
             if self.enforce_non_overlap and next_points.shape[0] > 1:
+                if timing_enabled:
+                    self._sync_for_timing()
+                    t_overlap = time.perf_counter()
                 next_points = self._resolve_overlaps(next_points)
+                if timing_enabled:
+                    self._sync_for_timing()
+                    now = time.perf_counter()
+                    timing["overlap"] = timing.get("overlap", 0.0) + (now - t_overlap)
+                    t_prev = now
         else:
             next_points = cp.empty((0, 3), dtype=self.dtype)
             next_ids = cp.empty((0,), dtype=cp.int64)
+            mark("assemble")
 
         if self.max_cells is not None and next_points.shape[0] > self.max_cells:
             raise RuntimeError(f"Cell limit exceeded: {next_points.shape[0]} > {self.max_cells}")
@@ -808,14 +1451,31 @@ class CellGrowth3D:
                 source_alpha=source_alpha,
                 target_alpha=target_alpha,
             )
+        mark("transition")
 
         self.points = next_points
         self.cell_ids = next_ids
         self.step_index += 1
         self.count_history.append(int(self.points.shape[0]))
+        mark("commit")
+
+        if timing_enabled:
+            self._sync_for_timing()
+            timing["total"] = time.perf_counter() - t_total_start
+            timing["step"] = float(step_number)
+            timing["n_before"] = float(n_before)
+            timing["n_after"] = float(self.points.shape[0])
+            self.last_step_timing = timing
+            self.step_timing_history.append(dict(timing))
+        else:
+            self.last_step_timing = None
         return self.points, transition
 
-    def step(self, action_rule: Optional[ActionRule] = None) -> cp.ndarray:
+    def step(
+        self,
+        action_rule: Optional[ActionRule] = None,
+        profile_timing: bool = False,
+    ) -> cp.ndarray:
         """
         Run one timestep.
 
@@ -828,6 +1488,7 @@ class CellGrowth3D:
             action_rule=action_rule,
             return_transition=False,
             death_animation="none",
+            profile_timing=profile_timing,
         )
         return next_points
 
@@ -835,12 +1496,14 @@ class CellGrowth3D:
         self,
         action_rule: Optional[ActionRule] = None,
         death_animation: str = "none",
+        profile_timing: bool = False,
     ) -> StepTransition:
         """Run one timestep and return source->target points for interpolation."""
         _, transition = self._step_internal(
             action_rule=action_rule,
             return_transition=True,
             death_animation=death_animation,
+            profile_timing=profile_timing,
         )
         if transition is None:
             raise RuntimeError("Internal error: expected transition metadata.")
@@ -851,13 +1514,16 @@ class CellGrowth3D:
         n_steps: int,
         action_rule: Optional[ActionRule] = None,
         log_counts: bool = False,
+        log_timing: bool = False,
     ) -> cp.ndarray:
         for _ in range(n_steps):
             if self.points.shape[0] == 0:
                 break
-            self.step(action_rule=action_rule)
+            self.step(action_rule=action_rule, profile_timing=log_timing)
             if log_counts:
                 print(f"Step {self.step_index}: {self.points.shape[0]} cells")
+            if log_timing and self.last_step_timing is not None:
+                print(self._format_step_timing(self.last_step_timing))
         return self.points
 
     def run_and_save_movie(
@@ -867,6 +1533,7 @@ class CellGrowth3D:
         *,
         action_rule: Optional[ActionRule] = None,
         log_counts: bool = False,
+        log_timing: bool = False,
         interp_frames: int = 8,
         fps: int = 24,
         show_centers: bool = False,
@@ -944,9 +1611,12 @@ class CellGrowth3D:
             transition = self.step_with_transition(
                 action_rule=action_rule,
                 death_animation=death_animation,
+                profile_timing=log_timing,
             )
             if log_counts:
                 print(f"Step {self.step_index}: {self.points.shape[0]} cells")
+            if log_timing and self.last_step_timing is not None:
+                print(self._format_step_timing(self.last_step_timing))
             transitions_np.append(
                 (
                     to_numpy(transition.source_points),
@@ -1183,6 +1853,18 @@ def _build_cli() -> argparse.ArgumentParser:
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
+        "--timing",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_TIMING,
+        help="Print per-step timing breakdown for simulation kernels",
+    )
+    parser.add_argument(
+        "--timing-sync-gpu",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_TIMING_SYNC_GPU,
+        help="Synchronize GPU before timing marks for accurate timings",
+    )
+    parser.add_argument(
         "--show",
         action=argparse.BooleanOptionalAction,
         default=DEFAULT_SHOW,
@@ -1282,8 +1964,19 @@ def _build_cli() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _build_cli().parse_args()
-    sim = CellGrowth3D(seed=args.seed, max_cells=args.max_cells)
+    sim = CellGrowth3D(
+        seed=args.seed,
+        max_cells=args.max_cells,
+        enable_step_timing=args.timing,
+        sync_timing_gpu=args.timing_sync_gpu,
+    )
     print(backend_summary())
+    if _GPU_ENABLED:
+        if getattr(sim, "_gpu_kernels_ready", False):
+            print("GPU neighbor/overlap raw kernels: enabled")
+        else:
+            err = getattr(sim, "_gpu_kernel_error", None)
+            print(f"GPU neighbor/overlap raw kernels: disabled ({err})")
     print("Note: PyVista rendering/movie encoding is separate from simulation kernels.")
     color_by = "none" if args.color_by == "solid" else args.color_by
     if args.save_movie:
@@ -1291,6 +1984,7 @@ def main() -> None:
             args.steps,
             output_path=args.movie_path,
             log_counts=True,
+            log_timing=args.timing,
             interp_frames=args.interp_frames,
             fps=args.movie_fps,
             show_centers=args.show_centers,
@@ -1305,7 +1999,7 @@ def main() -> None:
             death_animation=args.movie_death_animation,
         )
     else:
-        sim.run(args.steps, log_counts=True)
+        sim.run(args.steps, log_counts=True, log_timing=args.timing)
 
     print(f"CuPy GPU enabled: {_GPU_ENABLED}")
     print(f"Steps executed: {sim.step_index}")
