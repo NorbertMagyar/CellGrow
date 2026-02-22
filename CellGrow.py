@@ -37,6 +37,8 @@ ActionRule = Callable[[cp.ndarray, int], cp.ndarray]
 DEFAULT_STEPS = 50
 DEFAULT_SHOW = True
 DEFAULT_COLOR_BY = "order"
+DEFAULT_CROWDING_STAY_THRESHOLD = 6
+DEFAULT_CROWDING_DEATH_THRESHOLD = 10
 DEFAULT_SAVE_MOVIE = True
 DEFAULT_MOVIE_PATH = "cell_growth.mp4"
 DEFAULT_MOVIE_FPS = 24
@@ -52,6 +54,11 @@ DEFAULT_MOVIE_MACRO_BLOCK_SIZE = 16
 DEFAULT_MOVIE_DEATH_ANIMATION = "shrink"
 DEFAULT_TIMING = False
 DEFAULT_TIMING_SYNC_GPU = True
+DEFAULT_MOVIE_ADAPTIVE_LARGE = True
+DEFAULT_MOVIE_LARGE_CELLS_THRESHOLD = 8000
+DEFAULT_MOVIE_LARGE_INTERP_FRAMES = 2
+DEFAULT_MOVIE_MAX_RENDER_CELLS = 18000
+DEFAULT_VIEW_MAX_RENDER_CELLS = 20000
 
 GPU_RAW_KERNELS_SRC = r"""
 __device__ inline float maxf_(const float a, const float b) {
@@ -327,6 +334,7 @@ def show_cells_pyvista(
     color_by: str = "order",
     cmap: str = "viridis",
     notebook: bool = False,
+    max_render_cells: Optional[int] = DEFAULT_VIEW_MAX_RENDER_CELLS,
 ) -> None:
     """
     Visualize cells as sphere glyphs in PyVista.
@@ -345,6 +353,14 @@ def show_cells_pyvista(
         raise ValueError("points must be shaped (N, 3)")
     if pts.shape[0] == 0:
         raise ValueError("No points to visualize.")
+
+    original_n = int(pts.shape[0])
+    if max_render_cells is not None and max_render_cells > 0 and pts.shape[0] > max_render_cells:
+        order_idx = np.arange(pts.shape[0], dtype=np.int64)
+        pick = np.linspace(0, order_idx.size - 1, int(max_render_cells), dtype=np.int64)
+        keep = order_idx[pick]
+        pts = pts[keep]
+        print(f"Static view: rendering {pts.shape[0]} sampled cells out of {original_n}.")
 
     radii = np.full(pts.shape[0], float(cell_radius), dtype=float)
 
@@ -441,8 +457,8 @@ class CellGrowth3D:
     radius: float = 1.0
     split_distance: float = 1.5
     neighborhood_radius_factor: float = 2.5
-    crowding_stay_threshold: int = 12
-    crowding_death_threshold: int = 16
+    crowding_stay_threshold: int = DEFAULT_CROWDING_STAY_THRESHOLD
+    crowding_death_threshold: int = DEFAULT_CROWDING_DEATH_THRESHOLD
     fast_neighbors: bool = True
     grid_cell_size: Optional[float] = None
     overlap_margin: float = 0.05
@@ -1534,6 +1550,10 @@ class CellGrowth3D:
         action_rule: Optional[ActionRule] = None,
         log_counts: bool = False,
         log_timing: bool = False,
+        adaptive_large_render: bool = DEFAULT_MOVIE_ADAPTIVE_LARGE,
+        large_cells_threshold: int = DEFAULT_MOVIE_LARGE_CELLS_THRESHOLD,
+        large_interp_frames: int = DEFAULT_MOVIE_LARGE_INTERP_FRAMES,
+        max_render_cells: Optional[int] = DEFAULT_MOVIE_MAX_RENDER_CELLS,
         interp_frames: int = 8,
         fps: int = 24,
         show_centers: bool = False,
@@ -1561,6 +1581,8 @@ class CellGrowth3D:
         """
         if interp_frames < 1:
             raise ValueError("interp_frames must be >= 1")
+        if large_interp_frames < 1:
+            raise ValueError("large_interp_frames must be >= 1")
         if fps < 1:
             raise ValueError("fps must be >= 1")
         if sphere_theta < 8 or sphere_phi < 8:
@@ -1571,6 +1593,10 @@ class CellGrowth3D:
             raise ValueError("window_size must be (width, height) with reasonable size")
         if macro_block_size < 1:
             raise ValueError("macro_block_size must be >= 1")
+        if large_cells_threshold < 1:
+            raise ValueError("large_cells_threshold must be >= 1")
+        if max_render_cells is not None and max_render_cells < 1:
+            raise ValueError("max_render_cells must be >= 1 when provided")
         valid_death_modes = {"none", "fade", "shrink", "fade_shrink"}
         if death_animation not in valid_death_modes:
             raise ValueError(f"death_animation must be one of {sorted(valid_death_modes)}")
@@ -1632,6 +1658,27 @@ class CellGrowth3D:
 
         final_points_np = to_numpy(self.points.copy())
         movie_max_order = max(1, int(self._next_cell_id - 1))
+        max_frame_cells = int(initial_points_np.shape[0])
+        for src, tgt, *_ in transitions_np:
+            max_frame_cells = max(max_frame_cells, int(src.shape[0]), int(tgt.shape[0]))
+
+        effective_interp_frames = int(interp_frames)
+        if adaptive_large_render and max_frame_cells >= large_cells_threshold:
+            effective_interp_frames = min(effective_interp_frames, int(large_interp_frames))
+            if effective_interp_frames != interp_frames:
+                print(
+                    "Adaptive movie: reducing interpolation frames "
+                    f"from {interp_frames} to {effective_interp_frames} "
+                    f"(max cells/frame={max_frame_cells})."
+                )
+
+        effective_max_render_cells = max_render_cells
+        if effective_max_render_cells is not None and max_frame_cells > effective_max_render_cells:
+            print(
+                "Adaptive movie: sampling each frame to "
+                f"{int(effective_max_render_cells)} cells "
+                f"(max cells/frame={max_frame_cells})."
+            )
 
         # Fixed camera based on final colony extent (fallback to initial if empty).
         framing_points = final_points_np if final_points_np.shape[0] > 0 else initial_points_np
@@ -1719,6 +1766,20 @@ class CellGrowth3D:
                 raise ValueError("Frame size array length must match frame point count.")
             if pts.shape[0] != alpha.shape[0]:
                 raise ValueError("Frame alpha array length must match frame point count.")
+
+            if (
+                effective_max_render_cells is not None
+                and pts.shape[0] > int(effective_max_render_cells)
+            ):
+                cap = int(effective_max_render_cells)
+                sorted_idx = np.argsort(order, kind="mergesort")
+                pick = np.linspace(0, sorted_idx.size - 1, cap, dtype=np.int64)
+                keep = sorted_idx[pick]
+                pts = pts[keep]
+                order = order[keep]
+                size = size[keep]
+                alpha = alpha[keep]
+
             # Clear actors but preserve renderer/light setup so shading stays consistent.
             try:
                 pl.clear_actors()
@@ -1813,8 +1874,8 @@ class CellGrowth3D:
                     write_frame(tgt, tgt_ids, tgt_size, tgt_alpha)
                     continue
 
-                for i in range(1, interp_frames + 1):
-                    alpha = i / float(interp_frames)
+                for i in range(1, effective_interp_frames + 1):
+                    alpha = i / float(effective_interp_frames)
                     frame_pts = (1.0 - alpha) * src + alpha * tgt
                     frame_order = (1.0 - alpha) * src_ids + alpha * tgt_ids
                     frame_size = (1.0 - alpha) * src_size + alpha * tgt_size
@@ -1851,6 +1912,18 @@ def _build_cli() -> argparse.ArgumentParser:
         default=200_000,
         help="Safety cap to prevent uncontrolled exponential growth",
     )
+    parser.add_argument(
+        "--crowding-stay-threshold",
+        type=int,
+        default=DEFAULT_CROWDING_STAY_THRESHOLD,
+        help="If neighbor count is above this value, cell stays (no divide)",
+    )
+    parser.add_argument(
+        "--crowding-death-threshold",
+        type=int,
+        default=DEFAULT_CROWDING_DEATH_THRESHOLD,
+        help="If neighbor count reaches this value, cell dies",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
         "--timing",
@@ -1874,6 +1947,15 @@ def _build_cli() -> argparse.ArgumentParser:
         "--show-centers",
         action="store_true",
         help="Overlay cell center points in the PyVista window",
+    )
+    parser.add_argument(
+        "--view-max-render-cells",
+        type=int,
+        default=DEFAULT_VIEW_MAX_RENDER_CELLS,
+        help=(
+            "Maximum cells to render in final static view "
+            "(0 disables sampling cap)"
+        ),
     )
     parser.add_argument(
         "--color-by",
@@ -1904,6 +1986,30 @@ def _build_cli() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_INTERP_FRAMES,
         help="Interpolated frames between consecutive timesteps in --save-movie mode",
+    )
+    parser.add_argument(
+        "--movie-adaptive-large-render",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_MOVIE_ADAPTIVE_LARGE,
+        help="Adapt movie rendering for large colonies (fewer interp frames/sampling)",
+    )
+    parser.add_argument(
+        "--movie-large-cells-threshold",
+        type=int,
+        default=DEFAULT_MOVIE_LARGE_CELLS_THRESHOLD,
+        help="Cell-count threshold where adaptive movie behavior starts",
+    )
+    parser.add_argument(
+        "--movie-large-interp-frames",
+        type=int,
+        default=DEFAULT_MOVIE_LARGE_INTERP_FRAMES,
+        help="Interp frames used after threshold when adaptive movie mode is on",
+    )
+    parser.add_argument(
+        "--movie-max-render-cells",
+        type=int,
+        default=DEFAULT_MOVIE_MAX_RENDER_CELLS,
+        help="Per-frame cell cap for movie rendering (0 disables cap)",
     )
     parser.add_argument(
         "--movie-width",
@@ -1964,9 +2070,13 @@ def _build_cli() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _build_cli().parse_args()
+    movie_max_render_cells = None if args.movie_max_render_cells == 0 else args.movie_max_render_cells
+    view_max_render_cells = None if args.view_max_render_cells == 0 else args.view_max_render_cells
     sim = CellGrowth3D(
         seed=args.seed,
         max_cells=args.max_cells,
+        crowding_stay_threshold=args.crowding_stay_threshold,
+        crowding_death_threshold=args.crowding_death_threshold,
         enable_step_timing=args.timing,
         sync_timing_gpu=args.timing_sync_gpu,
     )
@@ -1985,6 +2095,10 @@ def main() -> None:
             output_path=args.movie_path,
             log_counts=True,
             log_timing=args.timing,
+            adaptive_large_render=args.movie_adaptive_large_render,
+            large_cells_threshold=args.movie_large_cells_threshold,
+            large_interp_frames=args.movie_large_interp_frames,
+            max_render_cells=movie_max_render_cells,
             interp_frames=args.interp_frames,
             fps=args.movie_fps,
             show_centers=args.show_centers,
@@ -2009,7 +2123,11 @@ def main() -> None:
     print("First points:")
     print(preview)
     if args.show:
-        sim.visualize_pyvista(show_centers=args.show_centers, color_by=color_by)
+        sim.visualize_pyvista(
+            show_centers=args.show_centers,
+            color_by=color_by,
+            max_render_cells=view_max_render_cells,
+        )
 
 
 if __name__ == "__main__":
