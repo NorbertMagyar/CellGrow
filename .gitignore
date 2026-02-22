@@ -1,0 +1,11 @@
+# Python cache/artifacts
+__pycache__/
+*.py[cod]
+
+# CellGrow generated outputs
+*.mp4
+*.mov
+*.avi
+*.npz
+*.png
+*.gif
