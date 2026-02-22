@@ -34,12 +34,14 @@ except Exception:  # pragma: no cover - fallback only when CuPy is unavailable
 
 ActionRule = Callable[[cp.ndarray, int], cp.ndarray]
 
-DEFAULT_STEPS = 50
+DEFAULT_STEPS = 30
 DEFAULT_SHOW = True
 DEFAULT_COLOR_BY = "order"
-DEFAULT_CROWDING_STAY_THRESHOLD = 6
-DEFAULT_CROWDING_DEATH_THRESHOLD = 10
-DEFAULT_SAVE_MOVIE = True
+DEFAULT_CROWDING_STAY_THRESHOLD = 3
+DEFAULT_CROWDING_DEATH_THRESHOLD = 50
+DEFAULT_NEIGHBORHOOD_RADIUS_FACTOR = 2.5
+DEFAULT_DIVISION_DIRECTION_MODE = "least_resistance"
+DEFAULT_SAVE_MOVIE = False
 DEFAULT_MOVIE_PATH = "cell_growth.mp4"
 DEFAULT_MOVIE_FPS = 24
 DEFAULT_INTERP_FRAMES = 10
@@ -226,6 +228,87 @@ void local_resultant_kernel(
         out_vhat[3 * i + 0] = 0.0f;
         out_vhat[3 * i + 1] = 0.0f;
         out_vhat[3 * i + 2] = 0.0f;
+    }
+}
+
+extern "C" __global__
+void least_resistance_kernel(
+    const float* pos,
+    const long long* sort_idx,
+    const long long* start_lut,
+    const int* count_lut,
+    const float* origin,
+    const long long* min_cell,
+    const long long* max_cell,
+    const float cell_size,
+    const long long stride_x,
+    const long long stride_y,
+    const int span,
+    const float radius2,
+    const int n,
+    const float eps,
+    float* out_dirs
+) {
+    const int i = (int)(blockDim.x * blockIdx.x + threadIdx.x);
+    if (i >= n) return;
+
+    const float xi = pos[3 * i + 0];
+    const float yi = pos[3 * i + 1];
+    const float zi = pos[3 * i + 2];
+
+    const long long cix = (long long)floorf((xi - origin[0]) / cell_size);
+    const long long ciy = (long long)floorf((yi - origin[1]) / cell_size);
+    const long long ciz = (long long)floorf((zi - origin[2]) / cell_size);
+
+    float rx = 0.0f;
+    float ry = 0.0f;
+    float rz = 0.0f;
+
+    for (int dx = -span; dx <= span; ++dx) {
+        const long long nx = cix + (long long)dx;
+        if (nx < min_cell[0] || nx > max_cell[0]) continue;
+        for (int dy = -span; dy <= span; ++dy) {
+            const long long ny = ciy + (long long)dy;
+            if (ny < min_cell[1] || ny > max_cell[1]) continue;
+            for (int dz = -span; dz <= span; ++dz) {
+                const long long nz = ciz + (long long)dz;
+                if (nz < min_cell[2] || nz > max_cell[2]) continue;
+
+                const long long key = (nx - min_cell[0]) * stride_x + (ny - min_cell[1]) * stride_y + (nz - min_cell[2]);
+                const long long start = start_lut[key];
+                if (start < 0) continue;
+                const int c = count_lut[key];
+                for (int t = 0; t < c; ++t) {
+                    const int j = (int)sort_idx[start + (long long)t];
+                    if (j == i) continue;
+
+                    const float dx_ = pos[3 * j + 0] - xi;
+                    const float dy_ = pos[3 * j + 1] - yi;
+                    const float dz_ = pos[3 * j + 2] - zi;
+                    const float d2 = dx_ * dx_ + dy_ * dy_ + dz_ * dz_;
+                    if (d2 > radius2) continue;
+
+                    const float denom = maxf_(d2 * sqrtf(d2), eps);
+                    const float inv = 1.0f / denom;
+                    rx -= dx_ * inv;
+                    ry -= dy_ * inv;
+                    rz -= dz_ * inv;
+                }
+            }
+        }
+    }
+
+    const float rn = sqrtf(rx * rx + ry * ry + rz * rz);
+    if (rn > eps) {
+        out_dirs[3 * i + 0] = rx / rn;
+        out_dirs[3 * i + 1] = ry / rn;
+        out_dirs[3 * i + 2] = rz / rn;
+    } else {
+        float ux, uy, uz;
+        pseudo_unit_dir(i, i + 104729, &ux, &uy, &uz);
+        out_dirs[3 * i + 0] = ux;
+        out_dirs[3 * i + 1] = uy;
+        out_dirs[3 * i + 2] = uz;
     }
 }
 
@@ -456,7 +539,7 @@ class CellGrowth3D:
 
     radius: float = 1.0
     split_distance: float = 1.5
-    neighborhood_radius_factor: float = 2.5
+    neighborhood_radius_factor: float = DEFAULT_NEIGHBORHOOD_RADIUS_FACTOR
     crowding_stay_threshold: int = DEFAULT_CROWDING_STAY_THRESHOLD
     crowding_death_threshold: int = DEFAULT_CROWDING_DEATH_THRESHOLD
     fast_neighbors: bool = True
@@ -464,7 +547,7 @@ class CellGrowth3D:
     overlap_margin: float = 0.05
     density_radius: Optional[float] = None
     R_sense: Optional[float] = None
-    division_direction_mode: str = "tangential"
+    division_direction_mode: str = DEFAULT_DIVISION_DIRECTION_MODE
     neighbor_weight: str = "linear"
     radial_sign: str = "outward"
     eps: float = 1e-12
@@ -606,6 +689,7 @@ class CellGrowth3D:
         self._gpu_kernel_error = None
         self._kernel_neighbor_count = None
         self._kernel_local_resultant = None
+        self._kernel_least_resistance = None
         self._kernel_overlap = None
         if not _GPU_ENABLED:
             return
@@ -615,6 +699,9 @@ class CellGrowth3D:
             )
             self._kernel_local_resultant = cp.RawKernel(
                 GPU_RAW_KERNELS_SRC, "local_resultant_kernel"
+            )
+            self._kernel_least_resistance = cp.RawKernel(
+                GPU_RAW_KERNELS_SRC, "least_resistance_kernel"
             )
             self._kernel_overlap = cp.RawKernel(
                 GPU_RAW_KERNELS_SRC, "overlap_displacement_kernel"
@@ -638,6 +725,7 @@ class CellGrowth3D:
         self._gpu_kernel_error = str(exc)
         self._kernel_neighbor_count = None
         self._kernel_local_resultant = None
+        self._kernel_least_resistance = None
         self._kernel_overlap = None
         print(f"GPU raw kernels disabled at runtime, falling back: {exc}")
 
@@ -1127,6 +1215,43 @@ class CellGrowth3D:
         if n == 1:
             return cp.asarray([[1.0, 0.0, 0.0]], dtype=self.dtype)
 
+        # Fast path: local, grid-accelerated repulsion with cutoff R_sense.
+        # This lowers complexity from O(N^2) to roughly O(N*k) for stable density.
+        if self.fast_neighbors and self._gpu_fast_path_available(self.points):
+            try:
+                sense_radius = float(self.R_sense)
+                local_cell_size = float(max(self.eps, min(self.grid_cell_size, sense_radius)))
+                grid = self._build_grid(self.points, cell_size=local_cell_size)
+                start_lut, count_lut = self._ensure_grid_lookup(grid, cp)
+                dirs = cp.zeros((n, 3), dtype=self.dtype)
+                span = max(1, int(np.ceil(sense_radius / max(grid.cell_size, self.eps))))
+                blocks, threads = self._launch_cfg_1d(n)
+                self._kernel_least_resistance(
+                    blocks,
+                    threads,
+                    (
+                        self.points,
+                        grid.sort_idx,
+                        start_lut,
+                        count_lut,
+                        grid.origin,
+                        grid.min_cell,
+                        grid.max_cell,
+                        np.float32(grid.cell_size),
+                        np.int64(grid.stride_x),
+                        np.int64(grid.stride_y),
+                        np.int32(span),
+                        np.float32(sense_radius * sense_radius),
+                        np.int32(n),
+                        np.float32(self.eps),
+                        dirs,
+                    ),
+                )
+                return dirs
+            except Exception as exc:
+                self._disable_gpu_kernels(exc)
+
+        # Fallback: exact all-pairs O(N^2) repulsion.
         deltas = self.points[:, None, :] - self.points[None, :, :]  # (n, n, 3)
         dist2 = cp.sum(deltas * deltas, axis=2)
         mask = ~cp.eye(n, dtype=cp.bool_)
@@ -1909,7 +2034,7 @@ def _build_cli() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-cells",
         type=int,
-        default=200_000,
+        default=250_000,
         help="Safety cap to prevent uncontrolled exponential growth",
     )
     parser.add_argument(
