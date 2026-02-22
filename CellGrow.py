@@ -7,7 +7,8 @@ Model summary:
 - Fission replaces one parent with two daughters.
 - Division direction follows a "least resistance" heuristic:
   repulsive vector away from all other cells.
-- Post-division relaxation keeps a minimum center spacing of 1 radius.
+- Post-division relaxation uses a local overlap solver with contact distance 2*radius.
+- Uniform-grid spatial hashing is used as an acceleration structure only.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ except Exception:  # pragma: no cover - fallback only when CuPy is unavailable
 
 ActionRule = Callable[[cp.ndarray, int], cp.ndarray]
 
-DEFAULT_STEPS = 50
+DEFAULT_STEPS = 20
 DEFAULT_SHOW = True
 DEFAULT_COLOR_BY = "order"
 DEFAULT_SAVE_MOVIE = True
@@ -143,16 +144,49 @@ class StepTransition:
 
 
 @dataclass
+class GridStruct:
+    """
+    Uniform-grid spatial hash index for candidate neighbor generation.
+
+    Grid is acceleration only; positions remain continuous and exact distances
+    are used for all physical interactions.
+    """
+
+    origin: np.ndarray
+    keys_sorted: np.ndarray
+    sort_idx: np.ndarray
+    unique_keys: np.ndarray
+    start_idx: np.ndarray
+    counts: np.ndarray
+    positions_sorted: np.ndarray
+    min_cell: np.ndarray
+    max_cell: np.ndarray
+    stride_x: int
+    stride_y: int
+    cell_size: float
+    positions: np.ndarray
+
+
+@dataclass
 class CellGrowth3D:
     """GPU-accelerated 3D growth simulation for point-based cells."""
 
     radius: float = 1.0
-    split_distance: float = 1.0
-    neighborhood_radius_factor: float = 2.0
-    crowding_stay_threshold: int = 4
-    crowding_death_threshold: int = 6
+    split_distance: float = 1.5
+    neighborhood_radius_factor: float = 2.5
+    crowding_stay_threshold: int = 12
+    crowding_death_threshold: int = 16
+    fast_neighbors: bool = True
+    grid_cell_size: Optional[float] = None
+    overlap_margin: float = 0.05
+    density_radius: Optional[float] = None
+    R_sense: Optional[float] = None
+    division_direction_mode: str = "tangential"
+    neighbor_weight: str = "linear"
+    radial_sign: str = "outward"
+    eps: float = 1e-12
     enforce_non_overlap: bool = True
-    overlap_relax_iters: int = 32
+    overlap_relax_iters: int = 8
     overlap_tol: float = 1e-4
     seed: int = 42
     max_cells: Optional[int] = None
@@ -161,12 +195,42 @@ class CellGrowth3D:
     def __post_init__(self) -> None:
         if self.radius <= 0:
             raise ValueError("radius must be > 0")
+        if self.split_distance <= 0:
+            raise ValueError("split_distance must be > 0")
         if self.neighborhood_radius_factor <= 0:
             raise ValueError("neighborhood_radius_factor must be > 0")
         if self.crowding_stay_threshold < 0 or self.crowding_death_threshold < 0:
             raise ValueError("crowding thresholds must be >= 0")
         if self.crowding_death_threshold <= self.crowding_stay_threshold:
             raise ValueError("crowding_death_threshold must be > crowding_stay_threshold")
+        if self.overlap_margin < 0:
+            raise ValueError("overlap_margin must be >= 0")
+        if self.eps <= 0:
+            raise ValueError("eps must be > 0")
+
+        valid_dir_modes = {"least_resistance", "tangential", "radial"}
+        if self.division_direction_mode not in valid_dir_modes:
+            raise ValueError(f"division_direction_mode must be one of {sorted(valid_dir_modes)}")
+        valid_weight_modes = {"uniform", "linear", "gaussian"}
+        if self.neighbor_weight not in valid_weight_modes:
+            raise ValueError(f"neighbor_weight must be one of {sorted(valid_weight_modes)}")
+        valid_radial = {"inward", "outward", "random"}
+        if self.radial_sign not in valid_radial:
+            raise ValueError(f"radial_sign must be one of {sorted(valid_radial)}")
+
+        self.overlap_cutoff = float(2.0 * self.radius * (1.0 + self.overlap_margin))
+        if self.density_radius is None:
+            self.density_radius = float(self.neighborhood_radius_factor * self.radius)
+        if self.density_radius <= 0:
+            raise ValueError("density_radius must be > 0")
+        if self.R_sense is None:
+            self.R_sense = float(self.density_radius)
+        if self.R_sense <= 0:
+            raise ValueError("R_sense must be > 0")
+        if self.grid_cell_size is None:
+            self.grid_cell_size = float(max(self.overlap_cutoff, self.density_radius, self.R_sense))
+        if self.grid_cell_size <= 0:
+            raise ValueError("grid_cell_size must be > 0")
 
         self.points = cp.zeros((1, 3), dtype=self.dtype)
         self.cell_ids = cp.zeros((1,), dtype=cp.int64)
@@ -174,14 +238,180 @@ class CellGrowth3D:
         self.step_index = 0
         self.count_history = [1]
         self._rng = cp.random.RandomState(self.seed)
+        self._rng_np = np.random.RandomState(self.seed)
 
     @staticmethod
     def always_divide_rule(points: cp.ndarray, step: int) -> cp.ndarray:
         """Action rule: all cells divide (1 = divide, 0 = stay, -1 = die)."""
         return cp.ones(points.shape[0], dtype=cp.int8)
 
-    def _neighbor_counts_within(self, points: cp.ndarray, radius: float) -> cp.ndarray:
-        """Count neighbors within a fixed radius (self excluded)."""
+    def _as_numpy(self, arr: cp.ndarray) -> np.ndarray:
+        if _GPU_ENABLED:
+            return cp.asnumpy(arr)
+        return np.asarray(arr)
+
+    def _random_unit_vectors_np(self, n: int) -> np.ndarray:
+        vec = self._rng_np.normal(0.0, 1.0, size=(n, 3)).astype(float, copy=False)
+        norm = np.linalg.norm(vec, axis=1, keepdims=True)
+        return vec / np.maximum(norm, self.eps)
+
+    def _point_to_cell_coord(self, point: np.ndarray, origin: np.ndarray) -> np.ndarray:
+        rel = (point - origin) / float(self.grid_cell_size)
+        return np.floor(rel).astype(np.int64, copy=False)
+
+    def _cell_key(self, cell_coord: np.ndarray, grid: GridStruct) -> Optional[int]:
+        """
+        Convert integer cell coordinate to packed key used by the sorted index.
+
+        Grid is acceleration only; positions are continuous and no quantization
+        is applied to geometry beyond candidate lookup.
+        """
+        if np.any(cell_coord < grid.min_cell) or np.any(cell_coord > grid.max_cell):
+            return None
+        off = cell_coord - grid.min_cell
+        key = int(off[0] * grid.stride_x + off[1] * grid.stride_y + off[2])
+        return key
+
+    def _build_grid(self, positions: np.ndarray) -> GridStruct:
+        """
+        Build a uniform-grid spatial hash:
+        (origin, keys_sorted, sort_idx, unique_keys, start_idx, counts, positions_sorted).
+        """
+        n = positions.shape[0]
+        if n == 0:
+            zeros_i = np.zeros((0,), dtype=np.int64)
+            zeros_p = np.zeros((0, 3), dtype=float)
+            z3 = np.zeros(3, dtype=np.int64)
+            origin = np.zeros(3, dtype=float)
+            return GridStruct(
+                origin=origin,
+                keys_sorted=zeros_i,
+                sort_idx=zeros_i,
+                unique_keys=zeros_i,
+                start_idx=zeros_i,
+                counts=zeros_i,
+                positions_sorted=zeros_p,
+                min_cell=z3.copy(),
+                max_cell=z3.copy(),
+                stride_x=1,
+                stride_y=1,
+                cell_size=float(self.grid_cell_size),
+                positions=zeros_p,
+            )
+
+        pos = np.asarray(positions, dtype=float)
+        origin = pos.min(axis=0)
+        cell_coords = np.floor((pos - origin) / float(self.grid_cell_size)).astype(np.int64)
+        min_cell = cell_coords.min(axis=0)
+        max_cell = cell_coords.max(axis=0)
+        off = cell_coords - min_cell
+        ranges = (max_cell - min_cell + 1).astype(np.int64)
+        stride_y = int(ranges[2])
+        stride_x = int(ranges[1] * ranges[2])
+        keys = off[:, 0] * stride_x + off[:, 1] * stride_y + off[:, 2]
+
+        sort_idx = np.argsort(keys, kind="mergesort")
+        keys_sorted = keys[sort_idx]
+        positions_sorted = pos[sort_idx]
+        unique_keys, start_idx, counts = np.unique(
+            keys_sorted,
+            return_index=True,
+            return_counts=True,
+        )
+
+        return GridStruct(
+            origin=origin,
+            keys_sorted=keys_sorted.astype(np.int64, copy=False),
+            sort_idx=sort_idx.astype(np.int64, copy=False),
+            unique_keys=unique_keys.astype(np.int64, copy=False),
+            start_idx=start_idx.astype(np.int64, copy=False),
+            counts=counts.astype(np.int64, copy=False),
+            positions_sorted=positions_sorted,
+            min_cell=min_cell,
+            max_cell=max_cell,
+            stride_x=stride_x,
+            stride_y=stride_y,
+            cell_size=float(self.grid_cell_size),
+            positions=pos,
+        )
+
+    def _neighbor_data_within_radius(
+        self,
+        i: int,
+        positions: np.ndarray,
+        grid: GridStruct,
+        radius: float,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Return neighbor ids, exact displacement vectors (x_j - x_i), and distances.
+        Candidate cells come from neighboring bins around particle i;
+        filtering is exact Euclidean.
+        """
+        if positions.shape[0] <= 1:
+            empty_i = np.zeros((0,), dtype=np.int64)
+            empty_v = np.zeros((0, 3), dtype=float)
+            empty_d = np.zeros((0,), dtype=float)
+            return empty_i, empty_v, empty_d
+
+        p_i = positions[i]
+        cell_i = self._point_to_cell_coord(p_i, grid.origin)
+        candidates: list[np.ndarray] = []
+
+        span = max(1, int(np.ceil(float(radius) / max(grid.cell_size, self.eps))))
+        for dx in range(-span, span + 1):
+            for dy in range(-span, span + 1):
+                for dz in range(-span, span + 1):
+                    n_cell = cell_i + np.asarray([dx, dy, dz], dtype=np.int64)
+                    key = self._cell_key(n_cell, grid)
+                    if key is None:
+                        continue
+                    pos = np.searchsorted(grid.unique_keys, key)
+                    if pos >= grid.unique_keys.shape[0] or grid.unique_keys[pos] != key:
+                        continue
+                    start = int(grid.start_idx[pos])
+                    end = start + int(grid.counts[pos])
+                    if end > start:
+                        candidates.append(grid.sort_idx[start:end])
+
+        if not candidates:
+            empty_i = np.zeros((0,), dtype=np.int64)
+            empty_v = np.zeros((0, 3), dtype=float)
+            empty_d = np.zeros((0,), dtype=float)
+            return empty_i, empty_v, empty_d
+
+        cand = np.concatenate(candidates, axis=0)
+        cand = cand[cand != i]
+        if cand.size == 0:
+            empty_i = np.zeros((0,), dtype=np.int64)
+            empty_v = np.zeros((0, 3), dtype=float)
+            empty_d = np.zeros((0,), dtype=float)
+            return empty_i, empty_v, empty_d
+
+        vecs = positions[cand] - p_i
+        dist2 = np.einsum("ij,ij->i", vecs, vecs)
+        mask = dist2 <= float(radius * radius)
+        if not np.any(mask):
+            empty_i = np.zeros((0,), dtype=np.int64)
+            empty_v = np.zeros((0, 3), dtype=float)
+            empty_d = np.zeros((0,), dtype=float)
+            return empty_i, empty_v, empty_d
+
+        cand = cand[mask]
+        vecs = vecs[mask]
+        dists = np.sqrt(dist2[mask])
+        return cand.astype(np.int64, copy=False), vecs, dists
+
+    def _neighbors_within_radius(
+        self,
+        i: int,
+        positions: np.ndarray,
+        grid: GridStruct,
+        radius: float,
+    ) -> np.ndarray:
+        ids, _, _ = self._neighbor_data_within_radius(i, positions, grid, radius)
+        return ids
+
+    def _neighbor_counts_within_slow(self, points: cp.ndarray, radius: float) -> cp.ndarray:
         n = points.shape[0]
         if n == 0:
             return cp.zeros((0,), dtype=cp.int32)
@@ -194,6 +424,106 @@ class CellGrowth3D:
         within = within & (~cp.eye(n, dtype=cp.bool_))
         return cp.sum(within, axis=1, dtype=cp.int32)
 
+    def _neighbor_counts_within(self, points: cp.ndarray, radius: float) -> cp.ndarray:
+        """Count neighbors within fixed radius (self excluded), grid-accelerated."""
+        n = points.shape[0]
+        if n <= 1:
+            return cp.zeros((n,), dtype=cp.int32)
+        if not self.fast_neighbors:
+            return self._neighbor_counts_within_slow(points, radius)
+
+        pos_np = self._as_numpy(points)
+        grid = self._build_grid(pos_np)
+        counts = np.zeros(n, dtype=np.int32)
+        for i in range(n):
+            ids = self._neighbors_within_radius(i, pos_np, grid, radius)
+            counts[i] = ids.shape[0]
+        return cp.asarray(counts, dtype=cp.int32)
+
+    def _local_neighbor_resultants(
+        self,
+        positions: np.ndarray,
+        grid: GridStruct,
+        radius: float,
+        weight_mode: str,
+    ) -> np.ndarray:
+        """
+        Compute v_hat(i) from local neighbors using exact distances.
+        No direction quantization is introduced.
+        """
+        n = positions.shape[0]
+        v_hat = np.zeros((n, 3), dtype=float)
+        if n == 0:
+            return v_hat
+
+        sigma = 0.5 * radius
+        for i in range(n):
+            _, vecs, dists = self._neighbor_data_within_radius(i, positions, grid, radius)
+            if dists.size == 0:
+                continue
+            if weight_mode == "uniform":
+                w = np.ones_like(dists)
+            elif weight_mode == "linear":
+                w = np.maximum(0.0, 1.0 - dists / radius)
+            elif weight_mode == "gaussian":
+                w = np.exp(-((dists / max(sigma, self.eps)) ** 2))
+            else:
+                raise ValueError("Unknown neighbor weight mode.")
+
+            v = (w[:, None] * vecs).sum(axis=0)
+            vn = float(np.linalg.norm(v))
+            if vn > self.eps:
+                v_hat[i] = v / vn
+        return v_hat
+
+    def _division_dirs_from_vhat(self, v_hat: np.ndarray) -> np.ndarray:
+        n = v_hat.shape[0]
+        dirs = np.zeros((n, 3), dtype=float)
+        norms = np.linalg.norm(v_hat, axis=1)
+        tiny = norms <= self.eps
+
+        if self.division_direction_mode == "radial":
+            base = v_hat.copy()
+            if self.radial_sign == "inward":
+                base *= -1.0
+            elif self.radial_sign == "random":
+                s = self._rng_np.choice(np.asarray([-1.0, 1.0], dtype=float), size=n)
+                base *= s[:, None]
+            dirs = base
+            if np.any(~tiny):
+                dirs[~tiny] /= np.maximum(norms[~tiny, None], self.eps)
+        elif self.division_direction_mode == "tangential":
+            for i in range(n):
+                vi = v_hat[i]
+                vn = float(np.linalg.norm(vi))
+                if vn <= self.eps:
+                    continue
+                vi = vi / vn
+                found = False
+                for _ in range(3):
+                    u = self._random_unit_vectors_np(1)[0]
+                    d = np.cross(vi, u)
+                    dn = float(np.linalg.norm(d))
+                    if dn > self.eps:
+                        dirs[i] = d / dn
+                        found = True
+                        break
+                if not found:
+                    axis = np.asarray([1.0, 0.0, 0.0], dtype=float)
+                    if abs(float(np.dot(vi, axis))) > 0.9:
+                        axis = np.asarray([0.0, 1.0, 0.0], dtype=float)
+                    d = np.cross(vi, axis)
+                    dn = float(np.linalg.norm(d))
+                    if dn > self.eps:
+                        dirs[i] = d / dn
+
+        if np.any(tiny):
+            dirs[tiny] = self._random_unit_vectors_np(int(np.sum(tiny)))
+
+        dn = np.linalg.norm(dirs, axis=1, keepdims=True)
+        dirs = dirs / np.maximum(dn, self.eps)
+        return dirs
+
     def density_regulated_rule(self, points: cp.ndarray, step: int) -> cp.ndarray:
         """
         Default biological rule:
@@ -202,8 +532,7 @@ class CellGrowth3D:
         - otherwise: divide
         """
         del step  # Rule currently uses geometry only.
-        neighbor_radius = self.neighborhood_radius_factor * self.radius
-        counts = self._neighbor_counts_within(points, neighbor_radius)
+        counts = self._neighbor_counts_within(points, float(self.density_radius))
         actions = cp.ones(points.shape[0], dtype=cp.int8)
         actions[counts > self.crowding_stay_threshold] = 0
         actions[counts >= self.crowding_death_threshold] = -1
@@ -245,45 +574,63 @@ class CellGrowth3D:
 
     def _resolve_overlaps(self, pts: cp.ndarray) -> cp.ndarray:
         """
-        Iteratively separate cells so center distances are >= 1*radius.
+        Iteratively separate locally-overlapping cells with exact distances.
+
+        Grid is acceleration only; points are continuous and never snapped.
         """
         n = pts.shape[0]
         if n < 2:
             return pts
 
-        min_dist = float(1 * self.radius)
-        max_step = 0.25 * min_dist
-        jitter_scale = 1e-3 * min_dist
+        # Keep relaxation target consistent with fission spacing.
+        target_min_dist = float(max(self.split_distance, 1.0 * self.radius))
+        candidate_radius = float(
+            max(self.overlap_cutoff, target_min_dist * (1.0 + self.overlap_margin))
+        )
+        pos_np = self._as_numpy(pts).astype(float, copy=True)
 
-        for _ in range(self.overlap_relax_iters):
-            deltas = pts[:, None, :] - pts[None, :, :]  # (n, n, 3)
-            dist2 = cp.sum(deltas * deltas, axis=2)
-            dist = cp.sqrt(cp.maximum(dist2, 1e-12))
-            mask = ~cp.eye(n, dtype=cp.bool_)
+        for _ in range(max(1, self.overlap_relax_iters)):
+            moved = False
+            grid = self._build_grid(pos_np)
+            for i in range(n):
+                nbr_ids, vecs, dists = self._neighbor_data_within_radius(
+                    i,
+                    pos_np,
+                    grid,
+                    candidate_radius,
+                )
+                if nbr_ids.size == 0:
+                    continue
 
-            overlap = cp.maximum(min_dist - dist, 0.0)
-            overlap = cp.where(mask, overlap, 0.0)
-            if not bool(cp.any(overlap > self.overlap_tol)):
+                # Process each pair once.
+                mask = nbr_ids > i
+                if not np.any(mask):
+                    continue
+                nbr_ids = nbr_ids[mask]
+                vecs = vecs[mask]
+                dists = dists[mask]
+
+                for k, j in enumerate(nbr_ids):
+                    dist = float(dists[k])
+                    if dist >= target_min_dist - self.overlap_tol:
+                        continue
+                    penetration = target_min_dist - dist
+                    if dist <= self.eps:
+                        direction = self._random_unit_vectors_np(1)[0]
+                    else:
+                        # vec = x_j - x_i, so repulsive unit from j to i is -vec/|vec|
+                        direction = -vecs[k] / max(dist, self.eps)
+
+                    shift = 0.5 * penetration * direction
+                    ji = int(j)
+                    pos_np[i] += shift
+                    pos_np[ji] -= shift
+                    moved = True
+
+            if not moved:
                 break
 
-            # Gradient-style repulsion from neighbors that overlap.
-            weights = overlap / cp.maximum(dist, 1e-8)
-            disp = cp.einsum("ij,ijk->ik", weights, deltas).astype(self.dtype, copy=False)
-            disp_norm = cp.linalg.norm(disp, axis=1)
-            stuck = (cp.sum(overlap, axis=1) > 0.0) & (disp_norm < 1e-8)
-            if bool(cp.any(stuck)):
-                disp[stuck] = self._random_unit_vectors(int(stuck.sum()))
-                disp_norm = cp.linalg.norm(disp, axis=1)
-
-            disp_norm_col = disp_norm[:, None]
-            scale = cp.minimum(1.0, max_step / cp.maximum(disp_norm_col, 1e-8))
-            pts = pts + 0.5 * disp * scale
-
-            # Small nudge helps resolve exact duplicates quickly.
-            if bool(cp.any(stuck)):
-                pts[stuck] += jitter_scale * self._random_unit_vectors(int(stuck.sum()))
-
-        return pts
+        return cp.asarray(pos_np, dtype=self.dtype)
 
     def _step_internal(
         self,
@@ -339,7 +686,21 @@ class CellGrowth3D:
                 target_alpha_blocks.append(cp.full(n_stay, one_f, dtype=self.dtype))
 
         if bool(cp.any(divide_mask)):
-            dirs = self._least_resistance_directions()[divide_mask]
+            if self.division_direction_mode == "least_resistance":
+                # NOTE: kept for baseline behavior; this remains all-pairs and slow.
+                dirs_all = self._least_resistance_directions()
+            else:
+                pos_np = self._as_numpy(self.points)
+                grid = self._build_grid(pos_np)
+                v_hat = self._local_neighbor_resultants(
+                    pos_np,
+                    grid,
+                    float(self.R_sense),
+                    self.neighbor_weight,
+                )
+                dirs_all = cp.asarray(self._division_dirs_from_vhat(v_hat), dtype=self.dtype)
+
+            dirs = dirs_all[divide_mask]
             parents = self.points[divide_mask]
             parent_ids = self.cell_ids[divide_mask]
             # Never place sister cells closer than one radius.
@@ -420,6 +781,14 @@ class CellGrowth3D:
                 target_size = cp.concatenate(target_size_blocks, axis=0)
                 source_alpha = cp.concatenate(source_alpha_blocks, axis=0)
                 target_alpha = cp.concatenate(target_alpha_blocks, axis=0)
+
+                # Keep movie transitions continuous with simulation state:
+                # after overlap relaxation, live-cell targets should match next_points.
+                # Dead-cell entries (if animated) remain appended at the end.
+                live_count = int(next_points.shape[0])
+                if live_count > 0:
+                    target_points[:live_count] = next_points
+                    target_ids[:live_count] = next_ids
             else:
                 source_points = cp.empty((0, 3), dtype=self.dtype)
                 source_ids = cp.empty((0,), dtype=cp.int64)
