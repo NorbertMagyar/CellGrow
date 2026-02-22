@@ -32,7 +32,7 @@ except Exception:  # pragma: no cover - fallback only when CuPy is unavailable
 
 ActionRule = Callable[[cp.ndarray, int], cp.ndarray]
 
-DEFAULT_STEPS = 30
+DEFAULT_STEPS = 50
 DEFAULT_SHOW = True
 DEFAULT_COLOR_BY = "order"
 DEFAULT_SAVE_MOVIE = True
@@ -47,6 +47,7 @@ DEFAULT_MOVIE_SHOW_EDGES = False
 DEFAULT_MOVIE_EDGE_COLOR = "#202020"
 DEFAULT_MOVIE_EDGE_WIDTH = 0.6
 DEFAULT_MOVIE_MACRO_BLOCK_SIZE = 16
+DEFAULT_MOVIE_DEATH_ANIMATION = "shrink"
 
 
 def show_cells_pyvista(
@@ -135,6 +136,10 @@ class StepTransition:
     target_points: cp.ndarray
     source_ids: cp.ndarray
     target_ids: cp.ndarray
+    source_size: cp.ndarray
+    target_size: cp.ndarray
+    source_alpha: cp.ndarray
+    target_alpha: cp.ndarray
 
 
 @dataclass
@@ -145,7 +150,7 @@ class CellGrowth3D:
     split_distance: float = 1.0
     neighborhood_radius_factor: float = 2.0
     crowding_stay_threshold: int = 4
-    crowding_death_threshold: int = 12
+    crowding_death_threshold: int = 6
     enforce_non_overlap: bool = True
     overlap_relax_iters: int = 32
     overlap_tol: float = 1e-4
@@ -284,8 +289,13 @@ class CellGrowth3D:
         self,
         action_rule: Optional[ActionRule] = None,
         return_transition: bool = False,
+        death_animation: str = "none",
     ) -> tuple[cp.ndarray, Optional[StepTransition]]:
         """Core step logic with optional source->target transition capture."""
+        valid_death_modes = {"none", "fade", "shrink", "fade_shrink"}
+        if death_animation not in valid_death_modes:
+            raise ValueError(f"death_animation must be one of {sorted(valid_death_modes)}")
+
         rule = action_rule or self.density_regulated_rule
         actions = rule(self.points, self.step_index)
         if actions.shape != (self.points.shape[0],):
@@ -302,6 +312,15 @@ class CellGrowth3D:
         next_id_blocks = []
         source_blocks = []
         source_id_blocks = []
+        target_blocks = []
+        target_id_blocks = []
+        source_size_blocks = []
+        target_size_blocks = []
+        source_alpha_blocks = []
+        target_alpha_blocks = []
+
+        one_f = 1.0
+        zero_f = 0.0
 
         if bool(cp.any(stay_mask)):
             stay_points = self.points[stay_mask]
@@ -311,6 +330,13 @@ class CellGrowth3D:
             if return_transition:
                 source_blocks.append(stay_points)
                 source_id_blocks.append(stay_ids)
+                target_blocks.append(stay_points)
+                target_id_blocks.append(stay_ids)
+                n_stay = stay_points.shape[0]
+                source_size_blocks.append(cp.full(n_stay, one_f, dtype=self.dtype))
+                target_size_blocks.append(cp.full(n_stay, one_f, dtype=self.dtype))
+                source_alpha_blocks.append(cp.full(n_stay, one_f, dtype=self.dtype))
+                target_alpha_blocks.append(cp.full(n_stay, one_f, dtype=self.dtype))
 
         if bool(cp.any(divide_mask)):
             dirs = self._least_resistance_directions()[divide_mask]
@@ -338,6 +364,38 @@ class CellGrowth3D:
             if return_transition:
                 source_blocks.extend([parents, parents])
                 source_id_blocks.extend([parent_ids, parent_ids])
+                target_blocks.extend([daughters_a, daughters_b])
+                target_id_blocks.extend([daughter_ids_a, daughter_ids_b])
+                source_size_blocks.extend(
+                    [cp.full(n_div, one_f, dtype=self.dtype), cp.full(n_div, one_f, dtype=self.dtype)]
+                )
+                target_size_blocks.extend(
+                    [cp.full(n_div, one_f, dtype=self.dtype), cp.full(n_div, one_f, dtype=self.dtype)]
+                )
+                source_alpha_blocks.extend(
+                    [cp.full(n_div, one_f, dtype=self.dtype), cp.full(n_div, one_f, dtype=self.dtype)]
+                )
+                target_alpha_blocks.extend(
+                    [cp.full(n_div, one_f, dtype=self.dtype), cp.full(n_div, one_f, dtype=self.dtype)]
+                )
+
+        if return_transition and death_animation != "none" and bool(cp.any(die_mask)):
+            dead_points = self.points[die_mask]
+            dead_ids = self.cell_ids[die_mask]
+            n_dead = dead_points.shape[0]
+            source_blocks.append(dead_points)
+            source_id_blocks.append(dead_ids)
+            target_blocks.append(dead_points)
+            target_id_blocks.append(dead_ids)
+
+            do_fade = death_animation in {"fade", "fade_shrink"}
+            do_shrink = death_animation in {"shrink", "fade_shrink"}
+            target_alpha = zero_f if do_fade else one_f
+            target_size = zero_f if do_shrink else one_f
+            source_size_blocks.append(cp.full(n_dead, one_f, dtype=self.dtype))
+            target_size_blocks.append(cp.full(n_dead, target_size, dtype=self.dtype))
+            source_alpha_blocks.append(cp.full(n_dead, one_f, dtype=self.dtype))
+            target_alpha_blocks.append(cp.full(n_dead, target_alpha, dtype=self.dtype))
 
         if next_blocks:
             next_points = cp.concatenate(next_blocks, axis=0)
@@ -356,14 +414,30 @@ class CellGrowth3D:
             if source_blocks:
                 source_points = cp.concatenate(source_blocks, axis=0)
                 source_ids = cp.concatenate(source_id_blocks, axis=0)
+                target_points = cp.concatenate(target_blocks, axis=0)
+                target_ids = cp.concatenate(target_id_blocks, axis=0)
+                source_size = cp.concatenate(source_size_blocks, axis=0)
+                target_size = cp.concatenate(target_size_blocks, axis=0)
+                source_alpha = cp.concatenate(source_alpha_blocks, axis=0)
+                target_alpha = cp.concatenate(target_alpha_blocks, axis=0)
             else:
                 source_points = cp.empty((0, 3), dtype=self.dtype)
                 source_ids = cp.empty((0,), dtype=cp.int64)
+                target_points = cp.empty((0, 3), dtype=self.dtype)
+                target_ids = cp.empty((0,), dtype=cp.int64)
+                source_size = cp.empty((0,), dtype=self.dtype)
+                target_size = cp.empty((0,), dtype=self.dtype)
+                source_alpha = cp.empty((0,), dtype=self.dtype)
+                target_alpha = cp.empty((0,), dtype=self.dtype)
             transition = StepTransition(
                 source_points=source_points,
-                target_points=next_points.copy(),
+                target_points=target_points,
                 source_ids=source_ids,
-                target_ids=next_ids.copy(),
+                target_ids=target_ids,
+                source_size=source_size,
+                target_size=target_size,
+                source_alpha=source_alpha,
+                target_alpha=target_alpha,
             )
 
         self.points = next_points
@@ -381,12 +455,24 @@ class CellGrowth3D:
         - 0: stay
         - -1: die
         """
-        next_points, _ = self._step_internal(action_rule=action_rule, return_transition=False)
+        next_points, _ = self._step_internal(
+            action_rule=action_rule,
+            return_transition=False,
+            death_animation="none",
+        )
         return next_points
 
-    def step_with_transition(self, action_rule: Optional[ActionRule] = None) -> StepTransition:
+    def step_with_transition(
+        self,
+        action_rule: Optional[ActionRule] = None,
+        death_animation: str = "none",
+    ) -> StepTransition:
         """Run one timestep and return source->target points for interpolation."""
-        _, transition = self._step_internal(action_rule=action_rule, return_transition=True)
+        _, transition = self._step_internal(
+            action_rule=action_rule,
+            return_transition=True,
+            death_animation=death_animation,
+        )
         if transition is None:
             raise RuntimeError("Internal error: expected transition metadata.")
         return transition
@@ -425,6 +511,7 @@ class CellGrowth3D:
         edge_width: float = DEFAULT_MOVIE_EDGE_WIDTH,
         window_size: tuple[int, int] = (DEFAULT_MOVIE_WIDTH, DEFAULT_MOVIE_HEIGHT),
         macro_block_size: int = DEFAULT_MOVIE_MACRO_BLOCK_SIZE,
+        death_animation: str = DEFAULT_MOVIE_DEATH_ANIMATION,
     ) -> cp.ndarray:
         """
         Run simulation and save an MP4 with interpolated division motion.
@@ -432,7 +519,7 @@ class CellGrowth3D:
         Interpolation uses source->target mapping from each timestep:
         - stay: source is previous position
         - divide: both daughters start at parent position
-        - die: removed at the next frame
+        - die: either removed abruptly or animated (fade/shrink), per death_animation
         Movie rendering uses a fixed camera/bounds from final colony size and
         static-plot style for sphere appearance (color/opacity/tessellation).
         """
@@ -448,6 +535,9 @@ class CellGrowth3D:
             raise ValueError("window_size must be (width, height) with reasonable size")
         if macro_block_size < 1:
             raise ValueError("macro_block_size must be >= 1")
+        valid_death_modes = {"none", "fade", "shrink", "fade_shrink"}
+        if death_animation not in valid_death_modes:
+            raise ValueError(f"death_animation must be one of {sorted(valid_death_modes)}")
 
         out_w, out_h = int(window_size[0]), int(window_size[1])
         if macro_block_size > 1:
@@ -467,11 +557,25 @@ class CellGrowth3D:
         # Pass 1: simulate and capture transitions.
         initial_points_np = to_numpy(self.points.copy())
         initial_ids_np = to_numpy(self.cell_ids.copy())
-        transitions_np: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+        transitions_np: list[
+            tuple[
+                np.ndarray,
+                np.ndarray,
+                np.ndarray,
+                np.ndarray,
+                np.ndarray,
+                np.ndarray,
+                np.ndarray,
+                np.ndarray,
+            ]
+        ] = []
         for _ in range(n_steps):
             if self.points.shape[0] == 0:
                 break
-            transition = self.step_with_transition(action_rule=action_rule)
+            transition = self.step_with_transition(
+                action_rule=action_rule,
+                death_animation=death_animation,
+            )
             if log_counts:
                 print(f"Step {self.step_index}: {self.points.shape[0]} cells")
             transitions_np.append(
@@ -480,6 +584,10 @@ class CellGrowth3D:
                     to_numpy(transition.target_points),
                     to_numpy(transition.source_ids),
                     to_numpy(transition.target_ids),
+                    to_numpy(transition.source_size),
+                    to_numpy(transition.target_size),
+                    to_numpy(transition.source_alpha),
+                    to_numpy(transition.target_alpha),
                 )
             )
 
@@ -556,11 +664,22 @@ class CellGrowth3D:
                 pass
         pl.camera.clipping_range = (0.01, cam_distance + 20.0 * fit_radius)
 
-        def write_frame(points_np: np.ndarray, order_np: np.ndarray) -> None:
+        def write_frame(
+            points_np: np.ndarray,
+            order_np: np.ndarray,
+            size_np: np.ndarray,
+            alpha_np: np.ndarray,
+        ) -> None:
             pts = np.asarray(points_np, dtype=float)
             order = np.asarray(order_np, dtype=float).reshape(-1)
+            size = np.asarray(size_np, dtype=float).reshape(-1)
+            alpha = np.asarray(alpha_np, dtype=float).reshape(-1)
             if pts.shape[0] != order.shape[0]:
                 raise ValueError("Frame order array length must match frame point count.")
+            if pts.shape[0] != size.shape[0]:
+                raise ValueError("Frame size array length must match frame point count.")
+            if pts.shape[0] != alpha.shape[0]:
+                raise ValueError("Frame alpha array length must match frame point count.")
             # Clear actors but preserve renderer/light setup so shading stays consistent.
             try:
                 pl.clear_actors()
@@ -572,17 +691,20 @@ class CellGrowth3D:
                     pass
 
             if pts.shape[0] > 0:
-                radii = np.full(pts.shape[0], float(self.radius), dtype=float)
+                size = np.clip(size, 0.0, 1.0)
+                alpha = np.clip(alpha, 0.0, 1.0)
+                radii = np.full(pts.shape[0], float(self.radius), dtype=float) * size
                 cloud = pv.PolyData(pts)
                 cloud["scale"] = radii
                 spheres = cloud.glyph(geom=base_sphere, scale="scale", orient=False)
+                point_opacity = np.repeat(alpha * float(opacity), base_sphere.n_points)
                 if color_by == "radius":
                     spheres["val"] = np.repeat(radii, base_sphere.n_points)
                     pl.add_mesh(
                         spheres,
                         scalars="val",
                         cmap=cmap,
-                        opacity=opacity,
+                        opacity=point_opacity,
                         lighting=True,
                         smooth_shading=True,
                         ambient=0.12,
@@ -600,7 +722,7 @@ class CellGrowth3D:
                         scalars="val",
                         cmap=cmap,
                         clim=(0.0, float(movie_max_order)),
-                        opacity=opacity,
+                        opacity=point_opacity,
                         lighting=True,
                         smooth_shading=True,
                         ambient=0.12,
@@ -615,7 +737,7 @@ class CellGrowth3D:
                     pl.add_mesh(
                         spheres,
                         color="lightsteelblue",
-                        opacity=opacity,
+                        opacity=point_opacity,
                         lighting=True,
                         smooth_shading=True,
                         ambient=0.12,
@@ -643,18 +765,22 @@ class CellGrowth3D:
 
         try:
             # Initial frame
-            write_frame(initial_points_np, initial_ids_np)
+            initial_size = np.ones(initial_points_np.shape[0], dtype=float)
+            initial_alpha = np.ones(initial_points_np.shape[0], dtype=float)
+            write_frame(initial_points_np, initial_ids_np, initial_size, initial_alpha)
 
-            for src, tgt, src_ids, tgt_ids in transitions_np:
+            for src, tgt, src_ids, tgt_ids, src_size, tgt_size, src_alpha, tgt_alpha in transitions_np:
                 if src.shape[0] == 0:
-                    write_frame(tgt, tgt_ids)
+                    write_frame(tgt, tgt_ids, tgt_size, tgt_alpha)
                     continue
 
                 for i in range(1, interp_frames + 1):
                     alpha = i / float(interp_frames)
                     frame_pts = (1.0 - alpha) * src + alpha * tgt
                     frame_order = (1.0 - alpha) * src_ids + alpha * tgt_ids
-                    write_frame(frame_pts, frame_order)
+                    frame_size = (1.0 - alpha) * src_size + alpha * tgt_size
+                    frame_alpha = (1.0 - alpha) * src_alpha + alpha * tgt_alpha
+                    write_frame(frame_pts, frame_order, frame_size, frame_alpha)
         finally:
             pl.close()
 
@@ -776,6 +902,12 @@ def _build_cli() -> argparse.ArgumentParser:
         default=DEFAULT_MOVIE_MACRO_BLOCK_SIZE,
         help="Macro block size for MP4 encoding (16 for compatibility, 1 for exact size)",
     )
+    parser.add_argument(
+        "--movie-death-animation",
+        choices=["none", "fade", "shrink", "fade_shrink"],
+        default=DEFAULT_MOVIE_DEATH_ANIMATION,
+        help="Dying-cell animation in movies: none, fade, shrink, or fade_shrink",
+    )
     return parser
 
 
@@ -801,6 +933,7 @@ def main() -> None:
             edge_width=args.movie_edge_width,
             window_size=(args.movie_width, args.movie_height),
             macro_block_size=args.movie_macro_block_size,
+            death_animation=args.movie_death_animation,
         )
     else:
         sim.run(args.steps, log_counts=True)
