@@ -7,7 +7,7 @@ Model summary:
 - Fission replaces one parent with two daughters.
 - Division direction follows a "least resistance" heuristic:
   repulsive vector away from all other cells.
-- Post-division relaxation uses a local overlap solver tied to split_distance.
+- Post-division relaxation uses local spring relaxation around split_distance.
 - Uniform-grid spatial hashing is used as an acceleration structure only.
 """
 
@@ -34,12 +34,13 @@ except Exception:  # pragma: no cover - fallback only when CuPy is unavailable
 
 ActionRule = Callable[[cp.ndarray, int], cp.ndarray]
 
-DEFAULT_STEPS = 100
+DEFAULT_STEPS = 10
 DEFAULT_SHOW = True
 DEFAULT_COLOR_BY = "order"
-DEFAULT_CROWDING_STAY_THRESHOLD = 5
-DEFAULT_CROWDING_DEATH_THRESHOLD = 10
-DEFAULT_NEIGHBORHOOD_RADIUS_FACTOR = 2.5
+DEFAULT_CROWDING_STAY_THRESHOLD = 12
+DEFAULT_CROWDING_DEATH_THRESHOLD = 16
+DEFAULT_NEIGHBORHOOD_RADIUS_FACTOR = 2.1
+DEFAULT_OVERLAP_RELAX_ITERS = 10
 DEFAULT_DIVISION_DIRECTION_MODE = "tangential"
 DEFAULT_OUTPUT_STEM = (
     f"cell_growth_"
@@ -47,21 +48,21 @@ DEFAULT_OUTPUT_STEM = (
     f"de_{DEFAULT_CROWDING_DEATH_THRESHOLD}_"
     f"dir_{DEFAULT_DIVISION_DIRECTION_MODE}"
 )
-DEFAULT_SAVE_DATA = True
+DEFAULT_SAVE_DATA = False
 DEFAULT_DATA_PATH = f"{DEFAULT_OUTPUT_STEM}.npz"
-DEFAULT_SAVE_SNAPSHOT = True
+DEFAULT_SAVE_SNAPSHOT = False
 DEFAULT_SNAPSHOT_PATH = f"{DEFAULT_OUTPUT_STEM}.png"
-DEFAULT_SAVE_MOVIE = True
+DEFAULT_SAVE_MOVIE = False
 DEFAULT_MOVIE_PATH = f"{DEFAULT_OUTPUT_STEM}.mp4"
 DEFAULT_MOVIE_FPS = 24
-DEFAULT_MOVIE_DURATION_SECONDS: Optional[float] = 10
+DEFAULT_MOVIE_DURATION_SECONDS: Optional[float] = 20
 DEFAULT_INTERP_FRAMES = 10
 DEFAULT_MOVIE_WIDTH = 1024
 DEFAULT_MOVIE_HEIGHT = 860
 DEFAULT_MOVIE_SPHERE_THETA = 16
 DEFAULT_MOVIE_SPHERE_PHI = 16
 DEFAULT_MOVIE_SHOW_EDGES = False
-DEFAULT_MOVIE_EDGE_COLOR = "#202020"
+DEFAULT_MOVIE_EDGE_COLOR = "#000000"
 DEFAULT_MOVIE_EDGE_WIDTH = 0.6
 DEFAULT_MOVIE_MACRO_BLOCK_SIZE = 16
 DEFAULT_MOVIE_DEATH_ANIMATION = "shrink"
@@ -72,6 +73,24 @@ DEFAULT_MOVIE_LARGE_CELLS_THRESHOLD = 8000
 DEFAULT_MOVIE_LARGE_INTERP_FRAMES = 2
 DEFAULT_MOVIE_MAX_RENDER_CELLS = 18000
 DEFAULT_VIEW_MAX_RENDER_CELLS = 20000
+DEFAULT_ENABLE_CELL_PROGRAM = True
+DEFAULT_ENABLE_PROGRAM_DIVISION_MODULATION = True
+DEFAULT_PROGRAM_TAU_BIRTH = 1
+DEFAULT_PROGRAM_TAU_CYCLE = 1
+DEFAULT_PROGRAM_W_BIRTH = 1.0
+DEFAULT_PROGRAM_W_CYCLE = 1.0
+DEFAULT_PROGRAM_SURFACE_GAIN = 0.1
+DEFAULT_PROGRAM_CROWD_GAIN = 0.2
+DEFAULT_PROGRAM_NOISE = 0.01
+DEFAULT_PROGRAM_SIGMOID_CENTER = 0.5
+DEFAULT_PROGRAM_SIGMOID_SLOPE = 3.0
+DEFAULT_PROGRAM_RADIAL_SIGN = "outward"
+DEFAULT_PROGRAM_DIVIDE_BOOST = 0.0
+DEFAULT_PROGRAM_DIVIDE_MIN_P = 0.0
+DEFAULT_PROGRAM_DIVIDE_MAX_P = 1.0
+DEFAULT_PROGRAM_SUMMARY = True
+DEFAULT_ENABLE_APOPTOSIS = True
+DEFAULT_APOPTOSIS_AGE = 2
 
 GPU_RAW_KERNELS_SRC = r"""
 __device__ inline float maxf_(const float a, const float b) {
@@ -174,7 +193,8 @@ void local_resultant_kernel(
     const int weight_mode,
     const int n,
     const float eps,
-    float* out_vhat
+    float* out_vhat,
+    float* out_vmag
 ) {
     const int i = (int)(blockDim.x * blockIdx.x + threadIdx.x);
     if (i >= n) return;
@@ -231,6 +251,7 @@ void local_resultant_kernel(
     }
 
     const float vn = sqrtf(vx * vx + vy * vy + vz * vz);
+    out_vmag[i] = vn;
     if (vn > eps) {
         out_vhat[3 * i + 0] = vx / vn;
         out_vhat[3 * i + 1] = vy / vn;
@@ -336,9 +357,12 @@ void overlap_displacement_kernel(
     const long long stride_x,
     const long long stride_y,
     const int span,
-    const float candidate_radius2,
-    const float target_min_dist,
-    const float overlap_tol,
+    const float adhesion_radius,
+    const float adhesion_radius2,
+    const float rest_dist,
+    const float spring_k,
+    const float spring_max_step,
+    const float relax_tol,
     const float eps,
     const int n,
     float* out_disp,
@@ -382,10 +406,9 @@ void overlap_displacement_kernel(
                     const float dy_ = yi - pos[3 * j + 1];
                     const float dz_ = zi - pos[3 * j + 2];
                     const float d2 = dx_ * dx_ + dy_ * dy_ + dz_ * dz_;
-                    if (d2 > candidate_radius2) continue;
+                    if (d2 > adhesion_radius2) continue;
 
                     const float d = sqrtf(d2);
-                    if (d >= target_min_dist - overlap_tol) continue;
 
                     float ux, uy, uz;
                     if (d > eps) {
@@ -397,8 +420,26 @@ void overlap_displacement_kernel(
                         pseudo_unit_dir(i, j, &ux, &uy, &uz);
                     }
 
-                    const float pen = target_min_dist - d;
-                    const float scale = 0.5f * pen;
+                    float scale = 0.0f;
+                    if (d < rest_dist - relax_tol) {
+                        // Strong local repulsion/projection when too close.
+                        const float gap = rest_dist - d;
+                        const float corr = fminf(gap, spring_max_step);
+                        scale = 0.5f * corr;
+                    } else if (d > rest_dist + relax_tol && adhesion_radius > rest_dist + relax_tol) {
+                        // Softer adhesion when farther than rest.
+                        // Attraction tapers to zero at the adhesion boundary.
+                        const float attr_err = d - rest_dist;
+                        const float span_attr = maxf_(adhesion_radius - rest_dist, eps);
+                        const float frac = attr_err / span_attr;
+                        if (frac >= 1.0f) continue;
+                        float delta = spring_k * attr_err * (1.0f - frac);
+                        if (delta > spring_max_step) delta = spring_max_step;
+                        scale = -0.5f * delta;
+                    } else {
+                        continue;
+                    }
+
                     sx += scale * ux;
                     sy += scale * uy;
                     sz += scale * uz;
@@ -575,13 +616,35 @@ class CellGrowth3D:
     radial_sign: str = "outward"
     eps: float = 1e-12
     enforce_non_overlap: bool = True
-    overlap_relax_iters: int = 8
+    overlap_relax_iters: int = DEFAULT_OVERLAP_RELAX_ITERS
     overlap_tol: float = 1e-4
+    rest_distance_factor: Optional[float] = None
+    adhesion_radius_factor: Optional[float] = None
+    spring_k: float = 0.05
+    spring_max_step: Optional[float] = None
     seed: int = 42
     max_cells: Optional[int] = None
     dtype: str = "float32"
     enable_step_timing: bool = False
     sync_timing_gpu: bool = True
+    enable_cell_program: bool = DEFAULT_ENABLE_CELL_PROGRAM
+    program_tau_birth: float = DEFAULT_PROGRAM_TAU_BIRTH
+    program_tau_cycle: float = DEFAULT_PROGRAM_TAU_CYCLE
+    program_w_birth: float = DEFAULT_PROGRAM_W_BIRTH
+    program_w_cycle: float = DEFAULT_PROGRAM_W_CYCLE
+    program_surface_gain: float = DEFAULT_PROGRAM_SURFACE_GAIN
+    program_crowd_gain: float = DEFAULT_PROGRAM_CROWD_GAIN
+    program_noise: float = DEFAULT_PROGRAM_NOISE
+    program_sigmoid_center: float = DEFAULT_PROGRAM_SIGMOID_CENTER
+    program_sigmoid_slope: float = DEFAULT_PROGRAM_SIGMOID_SLOPE
+    program_radial_sign: str = DEFAULT_PROGRAM_RADIAL_SIGN
+    enable_program_division_modulation: bool = DEFAULT_ENABLE_PROGRAM_DIVISION_MODULATION
+    program_divide_boost: float = DEFAULT_PROGRAM_DIVIDE_BOOST
+    program_divide_min_p: float = DEFAULT_PROGRAM_DIVIDE_MIN_P
+    program_divide_max_p: float = DEFAULT_PROGRAM_DIVIDE_MAX_P
+    print_program_summary: bool = DEFAULT_PROGRAM_SUMMARY
+    enable_apoptosis: bool = DEFAULT_ENABLE_APOPTOSIS
+    apoptosis_age: int = DEFAULT_APOPTOSIS_AGE
 
     def __post_init__(self) -> None:
         if self.radius <= 0:
@@ -598,6 +661,10 @@ class CellGrowth3D:
             raise ValueError("overlap_margin must be >= 0")
         if self.eps <= 0:
             raise ValueError("eps must be > 0")
+        if self.spring_k <= 0:
+            raise ValueError("spring_k must be > 0")
+        if self.apoptosis_age < 0:
+            raise ValueError("apoptosis_age must be >= 0")
 
         valid_dir_modes = {"least_resistance", "tangential", "radial"}
         if self.division_direction_mode not in valid_dir_modes:
@@ -608,6 +675,25 @@ class CellGrowth3D:
         valid_radial = {"inward", "outward", "random"}
         if self.radial_sign not in valid_radial:
             raise ValueError(f"radial_sign must be one of {sorted(valid_radial)}")
+        if self.program_tau_birth <= 0:
+            raise ValueError("program_tau_birth must be > 0")
+        if self.program_tau_cycle <= 0:
+            raise ValueError("program_tau_cycle must be > 0")
+        if self.program_sigmoid_slope <= 0:
+            raise ValueError("program_sigmoid_slope must be > 0")
+        if self.program_noise < 0:
+            raise ValueError("program_noise must be >= 0")
+        valid_program_radial = {"inward", "outward"}
+        if self.program_radial_sign not in valid_program_radial:
+            raise ValueError(
+                f"program_radial_sign must be one of {sorted(valid_program_radial)}"
+            )
+        if not (0.0 <= self.program_divide_min_p <= 1.0):
+            raise ValueError("program_divide_min_p must be in [0, 1]")
+        if not (0.0 <= self.program_divide_max_p <= 1.0):
+            raise ValueError("program_divide_max_p must be in [0, 1]")
+        if self.program_divide_max_p < self.program_divide_min_p:
+            raise ValueError("program_divide_max_p must be >= program_divide_min_p")
 
         self.overlap_cutoff = float(2.0 * self.radius * (1.0 + self.overlap_margin))
         if self.density_radius is None:
@@ -622,9 +708,24 @@ class CellGrowth3D:
             self.grid_cell_size = float(max(self.overlap_cutoff, self.density_radius, self.R_sense))
         if self.grid_cell_size <= 0:
             raise ValueError("grid_cell_size must be > 0")
+        if self.rest_distance_factor is None:
+            self.rest_distance_factor = float(self.split_distance / self.radius)
+        if self.rest_distance_factor <= 0:
+            raise ValueError("rest_distance_factor must be > 0")
+        if self.adhesion_radius_factor is None:
+            self.adhesion_radius_factor = float(self.neighborhood_radius_factor)
+        if self.adhesion_radius_factor <= 0:
+            raise ValueError("adhesion_radius_factor must be > 0")
+        if self.spring_max_step is None:
+            self.spring_max_step = float(0.25 * self.radius)
+        if self.spring_max_step <= 0:
+            raise ValueError("spring_max_step must be > 0")
 
         self.points = cp.zeros((1, 3), dtype=self.dtype)
         self.cell_ids = cp.zeros((1,), dtype=cp.int64)
+        self.birth_age = cp.zeros((1,), dtype=cp.int32)
+        self.cycle_age = cp.zeros((1,), dtype=cp.int32)
+        self.cell_prog = cp.zeros((1,), dtype=self.dtype)
         self._next_cell_id = 1
         self.step_index = 0
         self.count_history = [1]
@@ -634,9 +735,19 @@ class CellGrowth3D:
         self._offset_cache_cp: dict[int, cp.ndarray] = {}
         self.last_step_timing: Optional[dict[str, float]] = None
         self.step_timing_history: list[dict[str, float]] = []
+        self.last_program_summary: Optional[dict[str, float]] = None
         self._gpu_kernels_ready = False
         self._gpu_kernel_error: Optional[str] = None
         self._init_gpu_kernels()
+        self._assert_state_aligned()
+        if self.enable_cell_program:
+            print(
+                "Cell program enabled: "
+                f"tau_birth={self.program_tau_birth:g}, tau_cycle={self.program_tau_cycle:g}, "
+                f"w_birth={self.program_w_birth:g}, w_cycle={self.program_w_cycle:g}, "
+                f"surface_gain={self.program_surface_gain:g}, crowd_gain={self.program_crowd_gain:g}, "
+                f"noise={self.program_noise:g}, divide_boost={self.program_divide_boost:g}"
+            )
 
     @staticmethod
     def always_divide_rule(points: cp.ndarray, step: int) -> cp.ndarray:
@@ -685,7 +796,9 @@ class CellGrowth3D:
         parts = []
         order = [
             "rule",
+            "program",
             "masks",
+            "divide_mod",
             "stay",
             "divide",
             "death_anim",
@@ -706,6 +819,37 @@ class CellGrowth3D:
             f"Timing step {step_num}: total={total_ms:.2f}ms "
             f"(cells {n_before}->{n_after}) | {details}"
         )
+
+    def _format_program_summary(self, summary: dict[str, float]) -> str:
+        step_num = int(summary.get("step", -1))
+        n_cells = int(summary.get("cells", -1))
+        n_div = int(summary.get("divide", 0))
+        n_div_eligible = int(summary.get("divide_eligible", n_div))
+        n_stay = int(summary.get("stay", 0))
+        n_die = int(summary.get("die", 0))
+        n_apop = int(summary.get("apoptosis", 0))
+        return (
+            f"Program step {step_num}: cells={n_cells} | "
+            f"prog(mean/min/max)="
+            f"{summary.get('prog_mean', 0.0):.3f}/"
+            f"{summary.get('prog_min', 0.0):.3f}/"
+            f"{summary.get('prog_max', 0.0):.3f} | "
+            f"age_birth_mean={summary.get('birth_mean', 0.0):.2f} "
+            f"age_cycle_mean={summary.get('cycle_mean', 0.0):.2f} | "
+            f"actions divide={n_div} (eligible={n_div_eligible}) "
+            f"stay={n_stay} die={n_die} apoptosis={n_apop}"
+        )
+
+    def _assert_state_aligned(self) -> None:
+        n = int(self.points.shape[0])
+        if int(self.cell_ids.shape[0]) != n:
+            raise RuntimeError("Internal state mismatch: cell_ids length != points length")
+        if int(self.birth_age.shape[0]) != n:
+            raise RuntimeError("Internal state mismatch: birth_age length != points length")
+        if int(self.cycle_age.shape[0]) != n:
+            raise RuntimeError("Internal state mismatch: cycle_age length != points length")
+        if int(self.cell_prog.shape[0]) != n:
+            raise RuntimeError("Internal state mismatch: cell_prog length != points length")
 
     def _init_gpu_kernels(self) -> None:
         self._gpu_kernels_ready = False
@@ -1031,7 +1175,12 @@ class CellGrowth3D:
         within = within & (~cp.eye(n, dtype=cp.bool_))
         return cp.sum(within, axis=1, dtype=cp.int32)
 
-    def _neighbor_counts_within(self, points: cp.ndarray, radius: float) -> cp.ndarray:
+    def _neighbor_counts_within(
+        self,
+        points: cp.ndarray,
+        radius: float,
+        grid: Optional[GridStruct] = None,
+    ) -> cp.ndarray:
         """Count neighbors within fixed radius (self excluded), grid-accelerated."""
         xp_module = self._xp_of(points)
         n = points.shape[0]
@@ -1042,25 +1191,25 @@ class CellGrowth3D:
 
         if self._gpu_fast_path_available(points):
             try:
-                grid = self._build_grid(points)
-                start_lut, count_lut = self._ensure_grid_lookup(grid, cp)
+                use_grid = grid if grid is not None else self._build_grid(points)
+                start_lut, count_lut = self._ensure_grid_lookup(use_grid, cp)
                 counts = cp.zeros((n,), dtype=cp.int32)
-                span = max(1, int(np.ceil(float(radius) / max(grid.cell_size, self.eps))))
+                span = max(1, int(np.ceil(float(radius) / max(use_grid.cell_size, self.eps))))
                 blocks, threads = self._launch_cfg_1d(n)
                 self._kernel_neighbor_count(
                     blocks,
                     threads,
                     (
                         points,
-                        grid.sort_idx,
+                        use_grid.sort_idx,
                         start_lut,
                         count_lut,
-                        grid.origin,
-                        grid.min_cell,
-                        grid.max_cell,
-                        np.float32(grid.cell_size),
-                        np.int64(grid.stride_x),
-                        np.int64(grid.stride_y),
+                        use_grid.origin,
+                        use_grid.min_cell,
+                        use_grid.max_cell,
+                        np.float32(use_grid.cell_size),
+                        np.int64(use_grid.stride_x),
+                        np.int64(use_grid.stride_y),
                         np.int32(span),
                         np.float32(radius * radius),
                         np.int32(n),
@@ -1071,10 +1220,10 @@ class CellGrowth3D:
             except Exception as exc:
                 self._disable_gpu_kernels(exc)
 
-        grid = self._build_grid(points)
+        use_grid = grid if grid is not None else self._build_grid(points)
         counts = xp_module.zeros(n, dtype=xp_module.int32)
         for i in range(n):
-            ids = self._neighbors_within_radius(i, points, grid, radius)
+            ids = self._neighbors_within_radius(i, points, use_grid, radius)
             counts[i] = ids.shape[0]
         return counts.astype(xp_module.int32, copy=False)
 
@@ -1086,19 +1235,25 @@ class CellGrowth3D:
         weight_mode: str,
     ):
         """
-        Compute v_hat(i) from local neighbors using exact distances.
+        Compute local resultant direction and magnitude from exact neighbors.
+
+        Returns:
+        - v_hat: normalized resultant direction per cell
+        - v_mag: raw resultant magnitude before normalization
         No direction quantization is introduced.
         """
         xp_module = self._xp_of(positions)
         n = positions.shape[0]
         v_hat = xp_module.zeros((n, 3), dtype=float)
+        v_mag = xp_module.zeros((n,), dtype=float)
         if n == 0:
-            return v_hat
+            return v_hat, v_mag
 
         if self._gpu_fast_path_available(positions):
             try:
                 start_lut, count_lut = self._ensure_grid_lookup(grid, cp)
                 out = cp.zeros((n, 3), dtype=positions.dtype)
+                out_mag = cp.zeros((n,), dtype=positions.dtype)
                 span = max(1, int(np.ceil(float(radius) / max(grid.cell_size, self.eps))))
                 weight_mode_id = {"uniform": 0, "linear": 1, "gaussian": 2}[weight_mode]
                 sigma = float(0.5 * radius)
@@ -1125,9 +1280,10 @@ class CellGrowth3D:
                         np.int32(n),
                         np.float32(self.eps),
                         out,
+                        out_mag,
                     ),
                 )
-                return out
+                return out, out_mag
             except Exception as exc:
                 self._disable_gpu_kernels(exc)
 
@@ -1147,9 +1303,10 @@ class CellGrowth3D:
 
             v = (w[:, None] * vecs).sum(axis=0)
             vn = self._to_float(xp_module.sqrt(xp_module.sum(v * v)))
+            v_mag[i] = vn
             if vn > self.eps:
                 v_hat[i] = v / vn
-        return v_hat
+        return v_hat, v_mag
 
     def _division_dirs_from_vhat(self, v_hat):
         xp_module = self._xp_of(v_hat)
@@ -1209,6 +1366,155 @@ class CellGrowth3D:
         dirs = dirs / xp_module.maximum(dn, self.eps)
         return dirs
 
+    def _density_actions_from_counts(self, counts) -> cp.ndarray:
+        """Map local crowding counts to divide/stay/die actions."""
+        actions = cp.ones(counts.shape[0], dtype=cp.int8)
+        actions[counts > self.crowding_stay_threshold] = 0
+        actions[counts >= self.crowding_death_threshold] = -1
+        return actions
+
+    def _update_cell_program(
+        self,
+        points,
+        birth_age,
+        cycle_age,
+        *,
+        grid: Optional[GridStruct] = None,
+    ):
+        """
+        Compute per-cell internal program from ages and local geometry/crowding.
+
+        Uses continuous vectors/distances; grid is acceleration only.
+        Returns: (prog in [0,1], v_hat, neighbor_counts)
+        """
+        xp_module = self._xp_of(points)
+        n = int(points.shape[0])
+        if n == 0:
+            empty_prog = xp_module.zeros((0,), dtype=self.dtype)
+            empty_v = xp_module.zeros((0, 3), dtype=self.dtype)
+            empty_counts = xp_module.zeros((0,), dtype=xp_module.int32)
+            return empty_prog, empty_v, empty_counts
+
+        use_grid = grid if grid is not None else self._build_grid(points)
+        v_hat, v_mag = self._local_neighbor_resultants(
+            points,
+            use_grid,
+            float(self.R_sense),
+            self.neighbor_weight,
+        )
+        v_hat = v_hat.astype(self.dtype, copy=False)
+        v_mag = v_mag.astype(self.dtype, copy=False)
+        counts = self._neighbor_counts_within(
+            points,
+            float(self.density_radius),
+            grid=use_grid,
+        ).astype(xp_module.int32, copy=False)
+
+        a_birth = birth_age.astype(self.dtype, copy=False)
+        a_cycle = cycle_age.astype(self.dtype, copy=False)
+        term_birth = 1.0 - xp_module.exp(
+            -a_birth / max(float(self.program_tau_birth), self.eps)
+        )
+        term_cycle_recent = xp_module.exp(
+            -a_cycle / max(float(self.program_tau_cycle), self.eps)
+        )
+        # High right after division should bias tangential, so we reduce prog there.
+        cycle_effect = 1.0 - term_cycle_recent
+
+        # Use raw resultant magnitude, not ||v_hat|| (v_hat is normalized by design).
+        if xp_module is cp:
+            mag_scale = cp.mean(v_mag) + 2.0 * cp.std(v_mag) + self.eps
+        else:
+            mag_scale = np.percentile(v_mag, 90) + self.eps
+        surface = xp_module.clip(v_mag / mag_scale, 0.0, 1.0)
+
+        crowd_norm = float(max(1, self.crowding_death_threshold))
+        crowd = xp_module.clip(
+            counts.astype(self.dtype, copy=False) / crowd_norm,
+            0.0,
+            1.0,
+        )
+
+        noise = xp_module.zeros((n,), dtype=self.dtype)
+        if self.program_noise > 0:
+            if xp_module is cp:
+                noise = (
+                    self.program_noise
+                    * self._rng.normal(0.0, 1.0, size=n).astype(self.dtype, copy=False)
+                )
+            else:
+                noise = (
+                    self.program_noise
+                    * self._rng_np.normal(0.0, 1.0, size=n).astype(self.dtype, copy=False)
+                )
+
+        prog_raw = (
+            self.program_w_birth * term_birth
+            + self.program_w_cycle * cycle_effect
+            + self.program_surface_gain * surface
+            - self.program_crowd_gain * crowd
+            + noise
+        )
+        z = (prog_raw - self.program_sigmoid_center) * self.program_sigmoid_slope
+        prog = 1.0 / (1.0 + xp_module.exp(-z))
+        prog = xp_module.clip(prog, 0.0, 1.0).astype(self.dtype, copy=False)
+        return prog, v_hat, counts
+
+    def _division_dirs_programmed(self, points, v_hat, prog):
+        """
+        Programmed per-cell direction:
+        tangential for low prog (young cycle), radial for high prog (older/mature).
+        """
+        xp_module = self._xp_of(points)
+        n = int(points.shape[0])
+        if n == 0:
+            return xp_module.zeros((0, 3), dtype=self.dtype)
+
+        v_norm = xp_module.sqrt(xp_module.sum(v_hat * v_hat, axis=1, keepdims=True))
+        v_unit = xp_module.zeros_like(v_hat)
+        good_v = v_norm[:, 0] > self.eps
+        if self._any_true(good_v, xp_module):
+            v_unit[good_v] = v_hat[good_v] / xp_module.maximum(v_norm[good_v], self.eps)
+
+        if self.program_radial_sign == "outward":
+            # v_hat points toward local mass, so outward is -v_hat.
+            d_rad = -v_unit
+        else:
+            d_rad = v_unit.copy()
+
+        u = self._random_unit_vectors_backend(n, xp_module, self.dtype)
+        d_tan = xp_module.cross(v_unit, u)
+        dtn = xp_module.sqrt(xp_module.sum(d_tan * d_tan, axis=1, keepdims=True))
+        good_t = dtn[:, 0] > self.eps
+        if self._any_true(good_t, xp_module):
+            d_tan[good_t] = d_tan[good_t] / xp_module.maximum(dtn[good_t], self.eps)
+
+        unresolved = (~good_t) & good_v
+        if self._any_true(unresolved, xp_module):
+            idx = xp_module.where(unresolved)[0]
+            v = v_unit[idx]
+            axis = xp_module.zeros_like(v)
+            axis[:, 0] = 1.0
+            use_y = xp_module.abs(v[:, 0]) > 0.9
+            axis[use_y, 0] = 0.0
+            axis[use_y, 1] = 1.0
+            alt = xp_module.cross(v, axis)
+            altn = xp_module.sqrt(xp_module.sum(alt * alt, axis=1, keepdims=True))
+            good_alt = altn[:, 0] > self.eps
+            if self._any_true(good_alt, xp_module):
+                idx_good = idx[good_alt]
+                d_tan[idx_good] = alt[good_alt] / xp_module.maximum(altn[good_alt], self.eps)
+
+        prog_col = prog.reshape(-1, 1).astype(self.dtype, copy=False)
+        blended = (1.0 - prog_col) * d_tan + prog_col * d_rad
+        bn = xp_module.sqrt(xp_module.sum(blended * blended, axis=1, keepdims=True))
+        need_fallback = bn[:, 0] <= self.eps
+        if self._any_true(need_fallback, xp_module):
+            n_fb = self._to_int(need_fallback.sum())
+            blended[need_fallback] = self._random_unit_vectors_backend(n_fb, xp_module, self.dtype)
+            bn = xp_module.sqrt(xp_module.sum(blended * blended, axis=1, keepdims=True))
+        return blended / xp_module.maximum(bn, self.eps)
+
     def density_regulated_rule(self, points: cp.ndarray, step: int) -> cp.ndarray:
         """
         Default biological rule:
@@ -1218,10 +1524,7 @@ class CellGrowth3D:
         """
         del step  # Rule currently uses geometry only.
         counts = self._neighbor_counts_within(points, float(self.density_radius))
-        actions = cp.ones(points.shape[0], dtype=cp.int8)
-        actions[counts > self.crowding_stay_threshold] = 0
-        actions[counts >= self.crowding_death_threshold] = -1
-        return actions
+        return self._density_actions_from_counts(counts)
 
     def _random_unit_vectors(self, n: int) -> cp.ndarray:
         vec = self._rng.normal(0.0, 1.0, size=(n, 3)).astype(self.dtype, copy=False)
@@ -1296,7 +1599,7 @@ class CellGrowth3D:
 
     def _resolve_overlaps(self, pts: cp.ndarray) -> cp.ndarray:
         """
-        Iteratively separate locally-overlapping cells with exact distances.
+        Iteratively relax local pairwise springs with exact distances.
 
         Grid is acceleration only; points are continuous and never snapped.
         """
@@ -1304,16 +1607,15 @@ class CellGrowth3D:
         if n < 2:
             return pts
 
-        # Keep relaxation target consistent with fission spacing.
-        target_min_dist = float(max(self.split_distance, 1.0 * self.radius))
-        candidate_radius = float(target_min_dist * (1.0 + self.overlap_margin))
-        overlap_cell_size = float(max(self.eps, min(self.grid_cell_size, candidate_radius)))
+        rest_dist = float(self.rest_distance_factor * self.radius)
+        adhesion_radius = float(max(rest_dist, self.adhesion_radius_factor * self.radius))
+        overlap_cell_size = float(max(self.eps, min(self.grid_cell_size, adhesion_radius)))
         xp_module = self._xp_of(pts)
         pos = pts.astype(self.dtype, copy=True)
 
         if self._gpu_fast_path_available(pos):
             try:
-                span = max(1, int(np.ceil(candidate_radius / max(overlap_cell_size, self.eps))))
+                span = max(1, int(np.ceil(adhesion_radius / max(overlap_cell_size, self.eps))))
                 blocks, threads = self._launch_cfg_1d(n)
                 for _ in range(max(1, self.overlap_relax_iters)):
                     grid = self._build_grid(pos, cell_size=overlap_cell_size)
@@ -1335,8 +1637,11 @@ class CellGrowth3D:
                             np.int64(grid.stride_x),
                             np.int64(grid.stride_y),
                             np.int32(span),
-                            np.float32(candidate_radius * candidate_radius),
-                            np.float32(target_min_dist),
+                            np.float32(adhesion_radius),
+                            np.float32(adhesion_radius * adhesion_radius),
+                            np.float32(rest_dist),
+                            np.float32(self.spring_k),
+                            np.float32(self.spring_max_step),
                             np.float32(self.overlap_tol),
                             np.float32(self.eps),
                             np.int32(n),
@@ -1360,7 +1665,7 @@ class CellGrowth3D:
                     i,
                     pos,
                     grid,
-                    candidate_radius,
+                    adhesion_radius,
                 )
                 if nbr_ids.size == 0:
                     continue
@@ -1373,14 +1678,34 @@ class CellGrowth3D:
                 vecs = vecs[mask]
                 dists = dists[mask]
 
-                overlap_mask = dists < (target_min_dist - self.overlap_tol)
-                if not self._any_true(overlap_mask, xp_module):
+                # Strong repulsion for d < rest_dist, softer adhesion for d > rest_dist.
+                repulse_mask = dists < (rest_dist - self.overlap_tol)
+                attract_mask = dists > (rest_dist + self.overlap_tol)
+                if adhesion_radius <= (rest_dist + self.overlap_tol):
+                    attract_mask = xp_module.zeros_like(attract_mask)
+                active = repulse_mask | attract_mask
+                if not self._any_true(active, xp_module):
                     continue
 
                 moved = True
-                nbr_ids = nbr_ids[overlap_mask]
-                vecs = vecs[overlap_mask]
-                dists = dists[overlap_mask]
+                nbr_ids = nbr_ids[active]
+                vecs = vecs[active]
+                dists = dists[active]
+                repulse_mask = repulse_mask[active]
+                attract_mask = attract_mask[active]
+
+                scales = xp_module.zeros_like(dists)
+                if self._any_true(repulse_mask, xp_module):
+                    gaps = rest_dist - dists[repulse_mask]
+                    corr = xp_module.minimum(gaps, self.spring_max_step)
+                    scales[repulse_mask] = 0.5 * corr
+                if self._any_true(attract_mask, xp_module):
+                    attr_err = dists[attract_mask] - rest_dist
+                    span_attr = max(adhesion_radius - rest_dist, self.eps)
+                    frac = xp_module.clip(attr_err / span_attr, 0.0, 1.0)
+                    delta_attr = self.spring_k * attr_err * (1.0 - frac)
+                    delta_attr = xp_module.minimum(delta_attr, self.spring_max_step)
+                    scales[attract_mask] = -0.5 * delta_attr
 
                 dirs = xp_module.zeros_like(vecs)
                 nz = dists > self.eps
@@ -1391,8 +1716,8 @@ class CellGrowth3D:
                     z_count = self._to_int(z.sum())
                     dirs[z] = self._random_unit_vectors_backend(z_count, xp_module, pos.dtype)
 
-                penetration = target_min_dist - dists
-                shifts = 0.5 * penetration[:, None] * dirs
+                # unit_dir points j->i. Positive scales repel, negative scales attract.
+                shifts = scales[:, None] * dirs
                 disp[i] += shifts.sum(axis=0)
                 for axis in range(3):
                     xp_module.add.at(disp[:, axis], nbr_ids, -shifts[:, axis])
@@ -1436,8 +1761,34 @@ class CellGrowth3D:
             t_total_start = time.perf_counter()
             t_prev = t_total_start
 
+        self._assert_state_aligned()
         rule = action_rule or self.density_regulated_rule
-        actions = rule(self.points, self.step_index)
+
+        prog_all = None
+        v_hat_all = None
+        counts_all = None
+        program_grid = None
+        if self.enable_cell_program and self.points.shape[0] > 0:
+            program_grid = self._build_grid(self.points)
+            prog_all, v_hat_all, counts_all = self._update_cell_program(
+                self.points,
+                self.birth_age,
+                self.cycle_age,
+                grid=program_grid,
+            )
+        mark("program")
+
+        use_default_density_rule = action_rule is None
+        if action_rule is not None:
+            bound_func = getattr(action_rule, "__func__", None)
+            bound_self = getattr(action_rule, "__self__", None)
+            if bound_func is CellGrowth3D.density_regulated_rule and bound_self is self:
+                use_default_density_rule = True
+
+        if use_default_density_rule and counts_all is not None:
+            actions = self._density_actions_from_counts(counts_all)
+        else:
+            actions = rule(self.points, self.step_index)
         if actions.shape != (self.points.shape[0],):
             raise ValueError("Action rule must return a vector shaped (n_cells,)")
         mark("rule")
@@ -1448,10 +1799,47 @@ class CellGrowth3D:
 
         if bool(cp.any((~divide_mask) & (~stay_mask) & (~die_mask))):
             raise ValueError("Actions must only contain -1, 0, or 1.")
+
+        n_apoptosis_this_step = 0
+        if self.enable_apoptosis and self.points.shape[0] > 0:
+            apoptosis_mask = self.birth_age >= int(self.apoptosis_age)
+            if bool(cp.any(apoptosis_mask)):
+                n_apoptosis_this_step = self._to_int(apoptosis_mask.sum())
+                die_mask = die_mask | apoptosis_mask
+                divide_mask = divide_mask & (~apoptosis_mask)
+                stay_mask = stay_mask & (~apoptosis_mask)
         mark("masks")
+
+        n_divide_eligible = self._to_int(divide_mask.sum())
+        if (
+            self.enable_cell_program
+            and self.enable_program_division_modulation
+            and prog_all is not None
+            and bool(cp.any(divide_mask))
+        ):
+            eligible_divide_mask = divide_mask.copy()
+            p_divide = cp.clip(
+                1.0 + self.program_divide_boost * (prog_all - 0.5),
+                self.program_divide_min_p,
+                self.program_divide_max_p,
+            )
+            rand_u = self._rng.random_sample(self.points.shape[0]).astype(
+                self.dtype,
+                copy=False,
+            )
+            draw_divide = rand_u < p_divide
+            divide_mask = eligible_divide_mask & draw_divide
+            stay_mask = stay_mask | (eligible_divide_mask & (~draw_divide))
+        mark("divide_mod")
+        n_divide_final = self._to_int(divide_mask.sum())
+        n_stay_final = self._to_int(stay_mask.sum())
+        n_die_final = self._to_int(die_mask.sum())
 
         next_blocks = []
         next_id_blocks = []
+        next_birth_age_blocks = []
+        next_cycle_age_blocks = []
+        next_prog_blocks = []
         source_blocks = []
         source_id_blocks = []
         target_blocks = []
@@ -1467,8 +1855,17 @@ class CellGrowth3D:
         if bool(cp.any(stay_mask)):
             stay_points = self.points[stay_mask]
             stay_ids = self.cell_ids[stay_mask]
+            stay_birth_age = self.birth_age[stay_mask] + cp.int32(1)
+            stay_cycle_age = self.cycle_age[stay_mask] + cp.int32(1)
+            if self.enable_cell_program and prog_all is not None:
+                stay_prog = prog_all[stay_mask]
+            else:
+                stay_prog = self.cell_prog[stay_mask]
             next_blocks.append(stay_points)
             next_id_blocks.append(stay_ids)
+            next_birth_age_blocks.append(stay_birth_age.astype(cp.int32, copy=False))
+            next_cycle_age_blocks.append(stay_cycle_age.astype(cp.int32, copy=False))
+            next_prog_blocks.append(stay_prog.astype(self.dtype, copy=False))
             if return_transition:
                 source_blocks.append(stay_points)
                 source_id_blocks.append(stay_ids)
@@ -1482,12 +1879,17 @@ class CellGrowth3D:
         mark("stay")
 
         if bool(cp.any(divide_mask)):
-            if self.division_direction_mode == "least_resistance":
-                # NOTE: kept for baseline behavior; this remains all-pairs and slow.
+            if self.enable_cell_program and prog_all is not None and v_hat_all is not None:
+                dirs_all = self._division_dirs_programmed(
+                    self.points,
+                    v_hat_all,
+                    prog_all,
+                ).astype(self.dtype, copy=False)
+            elif self.division_direction_mode == "least_resistance":
                 dirs_all = self._least_resistance_directions()
             else:
-                grid = self._build_grid(self.points)
-                v_hat = self._local_neighbor_resultants(
+                grid = program_grid if program_grid is not None else self._build_grid(self.points)
+                v_hat, _ = self._local_neighbor_resultants(
                     self.points,
                     grid,
                     float(self.R_sense),
@@ -1517,6 +1919,12 @@ class CellGrowth3D:
             self._next_cell_id += 2 * n_div
             next_blocks.extend([daughters_a, daughters_b])
             next_id_blocks.extend([daughter_ids_a, daughter_ids_b])
+            daughters_birth_age = cp.zeros((n_div,), dtype=cp.int32)
+            daughters_cycle_age = cp.zeros((n_div,), dtype=cp.int32)
+            daughters_prog = cp.zeros((n_div,), dtype=self.dtype)
+            next_birth_age_blocks.extend([daughters_birth_age, daughters_birth_age.copy()])
+            next_cycle_age_blocks.extend([daughters_cycle_age, daughters_cycle_age.copy()])
+            next_prog_blocks.extend([daughters_prog, daughters_prog.copy()])
             if return_transition:
                 source_blocks.extend([parents, parents])
                 source_id_blocks.extend([parent_ids, parent_ids])
@@ -1558,6 +1966,9 @@ class CellGrowth3D:
         if next_blocks:
             next_points = cp.concatenate(next_blocks, axis=0)
             next_ids = cp.concatenate(next_id_blocks, axis=0)
+            next_birth_age = cp.concatenate(next_birth_age_blocks, axis=0)
+            next_cycle_age = cp.concatenate(next_cycle_age_blocks, axis=0)
+            next_prog = cp.concatenate(next_prog_blocks, axis=0)
             mark("assemble")
             if self.enforce_non_overlap and next_points.shape[0] > 1:
                 if timing_enabled:
@@ -1572,6 +1983,9 @@ class CellGrowth3D:
         else:
             next_points = cp.empty((0, 3), dtype=self.dtype)
             next_ids = cp.empty((0,), dtype=cp.int64)
+            next_birth_age = cp.empty((0,), dtype=cp.int32)
+            next_cycle_age = cp.empty((0,), dtype=cp.int32)
+            next_prog = cp.empty((0,), dtype=self.dtype)
             mark("assemble")
 
         if self.max_cells is not None and next_points.shape[0] > self.max_cells:
@@ -1619,8 +2033,49 @@ class CellGrowth3D:
 
         self.points = next_points
         self.cell_ids = next_ids
+        self.birth_age = next_birth_age
+        self.cycle_age = next_cycle_age
+        self.cell_prog = next_prog
         self.step_index += 1
         self.count_history.append(int(self.points.shape[0]))
+        if self.enable_cell_program:
+            n_after = int(self.points.shape[0])
+            if n_after > 0:
+                prog = self.cell_prog.astype(self.dtype, copy=False)
+                birth = self.birth_age.astype(self.dtype, copy=False)
+                cycle = self.cycle_age.astype(self.dtype, copy=False)
+                self.last_program_summary = {
+                    "step": float(self.step_index),
+                    "cells": float(n_after),
+                    "prog_mean": self._to_float(cp.mean(prog)),
+                    "prog_min": self._to_float(cp.min(prog)),
+                    "prog_max": self._to_float(cp.max(prog)),
+                    "birth_mean": self._to_float(cp.mean(birth)),
+                    "cycle_mean": self._to_float(cp.mean(cycle)),
+                    "divide": float(n_divide_final),
+                    "divide_eligible": float(n_divide_eligible),
+                    "stay": float(n_stay_final),
+                    "die": float(n_die_final),
+                    "apoptosis": float(n_apoptosis_this_step),
+                }
+            else:
+                self.last_program_summary = {
+                    "step": float(self.step_index),
+                    "cells": 0.0,
+                    "prog_mean": 0.0,
+                    "prog_min": 0.0,
+                    "prog_max": 0.0,
+                    "birth_mean": 0.0,
+                    "cycle_mean": 0.0,
+                    "divide": float(n_divide_final),
+                    "divide_eligible": float(n_divide_eligible),
+                    "stay": float(n_stay_final),
+                    "die": float(n_die_final),
+                    "apoptosis": float(n_apoptosis_this_step),
+                }
+        else:
+            self.last_program_summary = None
+        self._assert_state_aligned()
         mark("commit")
 
         if timing_enabled:
@@ -1686,6 +2141,8 @@ class CellGrowth3D:
             self.step(action_rule=action_rule, profile_timing=log_timing)
             if log_counts:
                 print(f"Step {self.step_index}: {self.points.shape[0]} cells")
+            if self.enable_cell_program and self.print_program_summary and self.last_program_summary:
+                print(self._format_program_summary(self.last_program_summary))
             if log_timing and self.last_step_timing is not None:
                 print(self._format_step_timing(self.last_step_timing))
         return self.points
@@ -1737,8 +2194,6 @@ class CellGrowth3D:
             raise ValueError("fps must be >= 1")
         if movie_duration_seconds is not None and movie_duration_seconds <= 0:
             raise ValueError("movie_duration_seconds must be > 0 when provided")
-        if sphere_theta < 8 or sphere_phi < 8:
-            raise ValueError("sphere_theta and sphere_phi must be >= 8")
         if edge_width < 0:
             raise ValueError("edge_width must be >= 0")
         if len(window_size) != 2 or window_size[0] < 320 or window_size[1] < 240:
@@ -1793,6 +2248,8 @@ class CellGrowth3D:
             )
             if log_counts:
                 print(f"Step {self.step_index}: {self.points.shape[0]} cells")
+            if self.enable_cell_program and self.print_program_summary and self.last_program_summary:
+                print(self._format_program_summary(self.last_program_summary))
             if log_timing and self.last_step_timing is not None:
                 print(self._format_step_timing(self.last_step_timing))
             transitions_np.append(
@@ -2079,10 +2536,16 @@ class CellGrowth3D:
 
         pts = self.points_numpy().astype(np.float32, copy=False)
         ids = cp.asnumpy(self.cell_ids) if _GPU_ENABLED else np.asarray(self.cell_ids)
+        birth_age = cp.asnumpy(self.birth_age) if _GPU_ENABLED else np.asarray(self.birth_age)
+        cycle_age = cp.asnumpy(self.cycle_age) if _GPU_ENABLED else np.asarray(self.cycle_age)
+        cell_prog = cp.asnumpy(self.cell_prog) if _GPU_ENABLED else np.asarray(self.cell_prog)
         np.savez_compressed(
             out,
             points=pts,
             cell_ids=ids.astype(np.int64, copy=False),
+            birth_age=birth_age.astype(np.int32, copy=False),
+            cycle_age=cycle_age.astype(np.int32, copy=False),
+            cell_prog=cell_prog.astype(np.float32, copy=False),
             count_history=np.asarray(self.count_history, dtype=np.int32),
             step_index=np.int32(self.step_index),
             next_cell_id=np.int64(self._next_cell_id),
@@ -2096,6 +2559,29 @@ class CellGrowth3D:
             division_direction_mode=np.asarray(self.division_direction_mode),
             neighbor_weight=np.asarray(self.neighbor_weight),
             radial_sign=np.asarray(self.radial_sign),
+            enable_cell_program=np.int8(1 if self.enable_cell_program else 0),
+            program_tau_birth=np.float32(self.program_tau_birth),
+            program_tau_cycle=np.float32(self.program_tau_cycle),
+            program_w_birth=np.float32(self.program_w_birth),
+            program_w_cycle=np.float32(self.program_w_cycle),
+            program_surface_gain=np.float32(self.program_surface_gain),
+            program_crowd_gain=np.float32(self.program_crowd_gain),
+            program_noise=np.float32(self.program_noise),
+            program_sigmoid_center=np.float32(self.program_sigmoid_center),
+            program_sigmoid_slope=np.float32(self.program_sigmoid_slope),
+            program_radial_sign=np.asarray(self.program_radial_sign),
+            enable_program_division_modulation=np.int8(
+                1 if self.enable_program_division_modulation else 0
+            ),
+            program_divide_boost=np.float32(self.program_divide_boost),
+            program_divide_min_p=np.float32(self.program_divide_min_p),
+            program_divide_max_p=np.float32(self.program_divide_max_p),
+            enable_apoptosis=np.int8(1 if self.enable_apoptosis else 0),
+            apoptosis_age=np.int32(self.apoptosis_age),
+            rest_distance_factor=np.float32(self.rest_distance_factor),
+            adhesion_radius_factor=np.float32(self.adhesion_radius_factor),
+            spring_k=np.float32(self.spring_k),
+            spring_max_step=np.float32(self.spring_max_step),
             dtype=np.asarray(self.dtype),
         )
         print(f"Saved data: {out}")
@@ -2143,6 +2629,90 @@ def _build_cli() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_CROWDING_DEATH_THRESHOLD,
         help="If neighbor count reaches this value, cell dies",
+    )
+    parser.add_argument(
+        "--apoptosis",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_ENABLE_APOPTOSIS,
+        help="Enable age-based apoptosis (birth_age >= apoptosis_age)",
+    )
+    parser.add_argument(
+        "--apoptosis-age",
+        type=int,
+        default=DEFAULT_APOPTOSIS_AGE,
+        help=f"Chronological age threshold for apoptosis (default: {DEFAULT_APOPTOSIS_AGE})",
+    )
+    parser.add_argument(
+        "--cell-program",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_ENABLE_CELL_PROGRAM,
+        help="Enable per-cell internal program (age + geometry + crowding)",
+    )
+    parser.add_argument(
+        "--program-tau-birth",
+        type=float,
+        default=DEFAULT_PROGRAM_TAU_BIRTH,
+        help="Chronological-age timescale for program maturation",
+    )
+    parser.add_argument(
+        "--program-tau-cycle",
+        type=float,
+        default=DEFAULT_PROGRAM_TAU_CYCLE,
+        help="Cycle-age timescale for post-division program effect",
+    )
+    parser.add_argument(
+        "--program-w-birth",
+        type=float,
+        default=DEFAULT_PROGRAM_W_BIRTH,
+        help="Weight of chronological age in per-cell program",
+    )
+    parser.add_argument(
+        "--program-w-cycle",
+        type=float,
+        default=DEFAULT_PROGRAM_W_CYCLE,
+        help="Weight of cycle age in per-cell program",
+    )
+    parser.add_argument(
+        "--program-surface-gain",
+        type=float,
+        default=DEFAULT_PROGRAM_SURFACE_GAIN,
+        help="Program gain from local surface-ness (|v_hat|)",
+    )
+    parser.add_argument(
+        "--program-crowd-gain",
+        type=float,
+        default=DEFAULT_PROGRAM_CROWD_GAIN,
+        help="Program suppression gain from local crowding",
+    )
+    parser.add_argument(
+        "--program-noise",
+        type=float,
+        default=DEFAULT_PROGRAM_NOISE,
+        help="Program noise amplitude used for symmetry breaking",
+    )
+    parser.add_argument(
+        "--program-divide-boost",
+        type=float,
+        default=DEFAULT_PROGRAM_DIVIDE_BOOST,
+        help="Strength of program-dependent division probability modulation",
+    )
+    parser.add_argument(
+        "--program-divide-modulation",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_ENABLE_PROGRAM_DIVISION_MODULATION,
+        help="Enable program-based stochastic modulation of divide-eligible cells",
+    )
+    parser.add_argument(
+        "--program-radial-sign",
+        choices=["outward", "inward"],
+        default=DEFAULT_PROGRAM_RADIAL_SIGN,
+        help="Radial sign for programmed directions (outward = -v_hat)",
+    )
+    parser.add_argument(
+        "--program-summary",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_PROGRAM_SUMMARY,
+        help="Print per-step summary of program values/ages/actions when cell program is enabled",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
@@ -2332,6 +2902,20 @@ def main() -> None:
         crowding_death_threshold=args.crowding_death_threshold,
         enable_step_timing=args.timing,
         sync_timing_gpu=args.timing_sync_gpu,
+        enable_cell_program=args.cell_program,
+        program_tau_birth=args.program_tau_birth,
+        program_tau_cycle=args.program_tau_cycle,
+        program_w_birth=args.program_w_birth,
+        program_w_cycle=args.program_w_cycle,
+        program_surface_gain=args.program_surface_gain,
+        program_crowd_gain=args.program_crowd_gain,
+        program_noise=args.program_noise,
+        program_divide_boost=args.program_divide_boost,
+        enable_program_division_modulation=args.program_divide_modulation,
+        program_radial_sign=args.program_radial_sign,
+        print_program_summary=args.program_summary,
+        enable_apoptosis=args.apoptosis,
+        apoptosis_age=args.apoptosis_age,
     )
     print(backend_summary())
     if _GPU_ENABLED:
@@ -2340,6 +2924,7 @@ def main() -> None:
         else:
             err = getattr(sim, "_gpu_kernel_error", None)
             print(f"GPU neighbor/overlap raw kernels: disabled ({err})")
+    print(f"Apoptosis: enabled={sim.enable_apoptosis}, age_threshold={sim.apoptosis_age}")
     print("Note: PyVista rendering/movie encoding is separate from simulation kernels.")
     color_by = "none" if args.color_by == "solid" else args.color_by
     if args.save_movie:

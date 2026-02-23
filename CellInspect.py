@@ -154,6 +154,7 @@ def build_cli() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    global points
     args = build_cli().parse_args()
     points, meta = load_sim_npz(args.input)
     radius_from_file = float(meta["radius"]) if "radius" in meta else 1.0
