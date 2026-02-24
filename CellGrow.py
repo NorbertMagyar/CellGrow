@@ -36,9 +36,9 @@ ActionRule = Callable[[cp.ndarray, int], cp.ndarray]
 
 DEFAULT_STEPS = 100
 DEFAULT_SHOW = True
-DEFAULT_COLOR_BY = "v"
+DEFAULT_COLOR_BY = "u"
 DEFAULT_CROWDING_STAY_THRESHOLD = 12
-DEFAULT_CROWDING_DEATH_THRESHOLD = 18
+DEFAULT_CROWDING_DEATH_THRESHOLD = 16
 DEFAULT_NEIGHBORHOOD_RADIUS_FACTOR = 2.1
 DEFAULT_OVERLAP_RELAX_ITERS = 8
 DEFAULT_DIVISION_DIRECTION_MODE = "tangential"
@@ -56,7 +56,7 @@ DEFAULT_SAVE_MOVIE = True
 DEFAULT_MOVIE_PATH = f"{DEFAULT_OUTPUT_STEM}.mp4"
 DEFAULT_MOVIE_FPS = 24
 DEFAULT_MOVIE_DURATION_SECONDS: Optional[float] = 10
-DEFAULT_INTERP_FRAMES = 10
+DEFAULT_INTERP_FRAMES = 1
 DEFAULT_MOVIE_WIDTH = 1024
 DEFAULT_MOVIE_HEIGHT = 860
 DEFAULT_MOVIE_SPHERE_THETA = 16
@@ -92,31 +92,32 @@ DEFAULT_PROGRAM_SUMMARY = True
 DEFAULT_ENABLE_APOPTOSIS = False
 DEFAULT_APOPTOSIS_AGE = 10
 DEFAULT_ENABLE_REACTION_DIFFUSION = True
-DEFAULT_RD_START_STEP = 10
-DEFAULT_RD_DT = 1.0
-DEFAULT_RD_DU = 0.02
-DEFAULT_RD_DV = 0.05
-DEFAULT_GS_F = 0.02
-DEFAULT_GS_K = 0.04
+DEFAULT_RD_START_STEP = 15
+DEFAULT_RD_DT = 0.1
+DEFAULT_RD_SUBSTEPS = 100
+DEFAULT_RD_DU = 0.1
+DEFAULT_RD_DV = 0.2
+DEFAULT_GS_F = 0.037
+DEFAULT_GS_K = 0.06
 DEFAULT_RD_MODEL = "gray_scott"
 DEFAULT_RD_CLAMP = True
-DEFAULT_RD_NOISE = 0.01
+DEFAULT_RD_NOISE = 0.0
 DEFAULT_RD_INIT_MODE = "seed_random_cells"
-DEFAULT_RD_SEED_AMP = 0.25
+DEFAULT_RD_SEED_AMP = 1.0
 DEFAULT_RD_SEED_FRAC = 0.1
 DEFAULT_RD_PRINT_STATS_EVERY = 50
 DEFAULT_RD_COUPLE_TO_PROG = True
-DEFAULT_RD_PROG_FROM = "v"
+DEFAULT_RD_PROG_FROM = "u"
 DEFAULT_RD_PROG_GAIN = 0.01
 DEFAULT_RD_PROG_CENTER = 0.1
 DEFAULT_DIVIDE_BASE_P = 0.0
-DEFAULT_RD_DIVIDE_BOOST = 1
+DEFAULT_RD_DIVIDE_BOOST = 0
 DEFAULT_RD_DIVIDE_CENTER = 0.25
 DEFAULT_RD_DIVIDE_MIN_P = 0.0
 DEFAULT_RD_DIVIDE_MAX_P = 1.0
-DEFAULT_RD_APOPTOSIS_BOOST = 2
+DEFAULT_RD_APOPTOSIS_BOOST = 0
 DEFAULT_RD_APOPTOSIS_BASE_P = 0.0
-DEFAULT_RD_APOPTOSIS_CENTER = 0.25
+DEFAULT_RD_APOPTOSIS_CENTER = 0.0
 DEFAULT_RD_APOPTOSIS_MIN_P = 0.0
 DEFAULT_RD_APOPTOSIS_MAX_P = 0.5
 DEFAULT_RD_INTERIOR_PROTECTION = True
@@ -770,6 +771,7 @@ class CellGrowth3D:
     enable_reaction_diffusion: bool = DEFAULT_ENABLE_REACTION_DIFFUSION
     R_signal: Optional[float] = None
     rd_dt: float = DEFAULT_RD_DT
+    rd_substeps: int = DEFAULT_RD_SUBSTEPS
     Du: float = DEFAULT_RD_DU
     Dv: float = DEFAULT_RD_DV
     rd_model: str = DEFAULT_RD_MODEL
@@ -822,6 +824,8 @@ class CellGrowth3D:
             raise ValueError("apoptosis_age must be >= 0")
         if self.rd_dt <= 0:
             raise ValueError("rd_dt must be > 0")
+        if self.rd_substeps < 1:
+            raise ValueError("rd_substeps must be >= 1")
         if self.Du < 0 or self.Dv < 0:
             raise ValueError("Du and Dv must be >= 0")
         if self.rd_noise < 0:
@@ -959,7 +963,8 @@ class CellGrowth3D:
             print(
                 "Reaction-diffusion enabled: "
                 f"model={self.rd_model}, R_signal={self.R_signal:g}, dt={self.rd_dt:g}, "
-                f"Du={self.Du:g}, Dv={self.Dv:g}, F={self.gs_F:g}, k={self.gs_k:g}, "
+                f"substeps={self.rd_substeps}, Du={self.Du:g}, Dv={self.Dv:g}, "
+                f"F={self.gs_F:g}, k={self.gs_k:g}, "
                 f"start_step={self.rd_start_step}"
             )
 
@@ -1226,8 +1231,8 @@ class CellGrowth3D:
         """Initialize per-cell reaction-diffusion fields u and v."""
         xp_module = self._xp_of(self.points)
         n = int(self.points.shape[0])
-        self.u = xp_module.ones((n,), dtype=self.dtype)
-        self.v = xp_module.zeros((n,), dtype=self.dtype)
+        self.u = xp_module.zeros((n,), dtype=self.dtype)
+        self.v = xp_module.ones((n,), dtype=self.dtype)
         if n == 0:
             return
 
@@ -1251,22 +1256,53 @@ class CellGrowth3D:
             center = self.points.mean(axis=0)
             d2 = xp_module.sum((self.points - center[None, :]) ** 2, axis=1)
             idx = self._to_int(xp_module.argmin(d2))
-            self.v[idx] += self.rd_seed_amp
-            self.u[idx] -= 0.5 * self.rd_seed_amp
+            self.u[idx] = 1.0
         elif self.rd_init_mode == "seed_random_cells":
-            n_seed = max(1, int(round(self.rd_seed_frac * n)))
             if xp_module is cp:
-                idx = self._rng.choice(n, size=n_seed, replace=False)
+                anchor_idx = self._to_int(self._rng.randint(0, n))
             else:
-                idx = self._rng_np.choice(n, size=n_seed, replace=False)
-            self.v[idx] += self.rd_seed_amp
-            self.u[idx] -= 0.5 * self.rd_seed_amp
+                anchor_idx = int(self._rng_np.randint(0, n))
+            n_seed = max(1, int(round(self.rd_seed_frac * n)))
+            idx = self._seed_indices_around_anchor(anchor_idx, n_seed=n_seed)
+            self.u[idx] = 1.0
         else:  # pragma: no cover
             raise ValueError(f"Unsupported rd_init_mode: {self.rd_init_mode}")
 
         if self.rd_clamp:
             self.u = self._clip01_backend(self.u, xp_module).astype(self.dtype, copy=False)
             self.v = self._clip01_backend(self.v, xp_module).astype(self.dtype, copy=False)
+
+    def _seed_indices_around_anchor(self, anchor_idx: int, n_seed: int = 1):
+        """
+        Build a contiguous seed around one anchor cell.
+
+        Primary selection is all cells within R_signal of the anchor.
+        If that set is too small, fill with nearest neighbors to reach n_seed.
+        """
+        xp_module = self._xp_of(self.points)
+        n = int(self.points.shape[0])
+        if n <= 0:
+            return xp_module.zeros((0,), dtype=xp_module.int64)
+
+        a = int(max(0, min(anchor_idx, n - 1)))
+        target = int(max(1, min(n_seed, n)))
+
+        anchor = self.points[a]
+        dif = self.points - anchor[None, :]
+        d2 = xp_module.sum(dif * dif, axis=1)
+
+        seed_radius = float(self.R_signal if self.R_signal is not None else self.density_radius)
+        if seed_radius > 0:
+            mask = d2 <= (seed_radius * seed_radius + self.eps)
+            idx = xp_module.where(mask)[0].astype(xp_module.int64, copy=False)
+        else:
+            idx = xp_module.asarray([a], dtype=xp_module.int64)
+
+        if int(idx.shape[0]) < target:
+            order = xp_module.argsort(d2)
+            idx = order[:target].astype(xp_module.int64, copy=False)
+
+        return idx
 
     def _reinitialize_rd_state_at_activation(self) -> None:
         """
@@ -1277,8 +1313,8 @@ class CellGrowth3D:
         """
         xp_module = self._xp_of(self.points)
         n = int(self.points.shape[0])
-        self.u = xp_module.ones((n,), dtype=self.dtype)
-        self.v = xp_module.zeros((n,), dtype=self.dtype)
+        self.u = xp_module.zeros((n,), dtype=self.dtype)
+        self.v = xp_module.ones((n,), dtype=self.dtype)
         if n == 0:
             return
 
@@ -1286,12 +1322,12 @@ class CellGrowth3D:
             center = self.points.mean(axis=0)
             d2 = xp_module.sum((self.points - center[None, :]) ** 2, axis=1)
             idx = self._to_int(xp_module.argmin(d2))
-            self.v[idx] += self.rd_seed_amp
-            self.u[idx] -= 0.5 * self.rd_seed_amp
+            self.u[idx] = 1.0
         elif self.rd_init_mode == "seed_random_cells":
             idx = self._to_int(self._rng.randint(0, n))
-            self.v[idx] += self.rd_seed_amp
-            self.u[idx] -= 0.5 * self.rd_seed_amp
+            n_seed = max(1, int(round(self.rd_seed_frac * n)))
+            idx = self._seed_indices_around_anchor(idx, n_seed=n_seed)
+            self.u[idx] = 1.0
         elif self.rd_init_mode == "uniform_noise":
             if self.rd_seed_amp > 0:
                 if xp_module is cp:
@@ -1876,50 +1912,56 @@ class CellGrowth3D:
         radius = float(self.R_signal)
         u = self.u.astype(self.dtype, copy=False)
         v = self.v.astype(self.dtype, copy=False)
-        u_bar, v_bar, _ = self._neighbor_means_two_scalars(points, u, v, radius, grid=use_grid)
+        dt = float(self.rd_dt)
+        substeps = int(self.rd_substeps)
 
-        du_diff = self.Du * (u_bar - u)
-        dv_diff = self.Dv * (v_bar - v)
+        for _ in range(substeps):
+            u_bar, v_bar, _ = self._neighbor_means_two_scalars(points, u, v, radius, grid=use_grid)
+            du_diff = self.Du * (u_bar - u)
+            dv_diff = self.Dv * (v_bar - v)
 
-        if self.rd_model == "gray_scott":
-            uvv = u * v * v
-            du_react = -uvv + self.gs_F * (1.0 - u)
-            dv_react = uvv - (self.gs_F + self.gs_k) * v
-        else:  # pragma: no cover
-            raise ValueError(f"Unsupported rd_model: {self.rd_model}")
+            if self.rd_model == "gray_scott":
+                # VisualPDE form:
+                # du/dt = Du*L(u) + u^2*v - (a+b)*u
+                # dv/dt = Dv*L(v) - u^2*v + a*(1-v)
+                # with a=gs_F and b=gs_k.
+                uuv = u * u * v
+                du_react = uuv - (self.gs_F + self.gs_k) * u
+                dv_react = -uuv + self.gs_F * (1.0 - v)
+            else:  # pragma: no cover
+                raise ValueError(f"Unsupported rd_model: {self.rd_model}")
 
-        u_new = u + self.rd_dt * (du_diff + du_react)
-        v_new = v + self.rd_dt * (dv_diff + dv_react)
+            u = u + dt * (du_diff + du_react)
+            v = v + dt * (dv_diff + dv_react)
 
-        if self.rd_noise > 0:
-            # Stochastic increment scales with sqrt(dt), so lowering dt also
-            # lowers per-step noise amplitude.
-            noise_sigma = float(self.rd_noise * np.sqrt(self.rd_dt))
-            if xp_module is cp:
-                u_new += (noise_sigma * self._rng.normal(0.0, 1.0, size=n)).astype(
-                    self.dtype,
-                    copy=False,
-                )
-                v_new += (noise_sigma * self._rng.normal(0.0, 1.0, size=n)).astype(
-                    self.dtype,
-                    copy=False,
-                )
-            else:
-                u_new += (noise_sigma * self._rng_np.normal(0.0, 1.0, size=n)).astype(
-                    self.dtype,
-                    copy=False,
-                )
-                v_new += (noise_sigma * self._rng_np.normal(0.0, 1.0, size=n)).astype(
-                    self.dtype,
-                    copy=False,
-                )
+            if self.rd_noise > 0:
+                # Each RD substep is an explicit timestep with variance ~dt.
+                noise_sigma = float(self.rd_noise * np.sqrt(dt))
+                if xp_module is cp:
+                    u += (noise_sigma * self._rng.normal(0.0, 1.0, size=n)).astype(
+                        self.dtype,
+                        copy=False,
+                    )
+                    v += (noise_sigma * self._rng.normal(0.0, 1.0, size=n)).astype(
+                        self.dtype,
+                        copy=False,
+                    )
+                else:
+                    u += (noise_sigma * self._rng_np.normal(0.0, 1.0, size=n)).astype(
+                        self.dtype,
+                        copy=False,
+                    )
+                    v += (noise_sigma * self._rng_np.normal(0.0, 1.0, size=n)).astype(
+                        self.dtype,
+                        copy=False,
+                    )
 
-        if self.rd_clamp:
-            u_new = self._clip01_backend(u_new, xp_module)
-            v_new = self._clip01_backend(v_new, xp_module)
+            if self.rd_clamp:
+                u = self._clip01_backend(u, xp_module)
+                v = self._clip01_backend(v, xp_module)
 
-        self.u = u_new.astype(self.dtype, copy=False)
-        self.v = v_new.astype(self.dtype, copy=False)
+        self.u = u.astype(self.dtype, copy=False)
+        self.v = v.astype(self.dtype, copy=False)
         return self.u, self.v
 
     def _update_cell_program(
@@ -2403,9 +2445,10 @@ class CellGrowth3D:
         if rd_active:
             candidate_mask = ~die_mask
             if bool(cp.any(candidate_mask)):
-                v_signal = cp.clip(self.v.astype(self.dtype, copy=False), 0.0, 1.0)
+                u_signal = cp.clip(self.u.astype(self.dtype, copy=False), 0.0, 1.0)
                 p_apop = cp.clip(
-                    self.rd_apoptosis_base_p + self.rd_apoptosis_boost * (self.rd_apoptosis_center - v_signal),
+                    self.rd_apoptosis_base_p
+                    + self.rd_apoptosis_boost * (self.rd_apoptosis_center - u_signal),
                     self.rd_apoptosis_min_p,
                     self.rd_apoptosis_max_p,
                 )
@@ -2431,15 +2474,15 @@ class CellGrowth3D:
         n_divide_eligible = self._to_int(divide_mask.sum())
         if rd_active and bool(cp.any(divide_mask)):
             eligible_divide_mask = divide_mask.copy()
-            v_signal = cp.clip(self.v.astype(self.dtype, copy=False), 0.0, 1.0)
-            # Low v -> higher divide probability. Apply both RD-specific and
+            u_signal = cp.clip(self.u.astype(self.dtype, copy=False), 0.0, 1.0)
+            # High u -> higher divide probability. Apply both RD-specific and
             # generic program bounds so global min/max knobs still cap behavior.
             p_min = max(self.rd_divide_min_p, self.program_divide_min_p)
             p_max = min(self.rd_divide_max_p, self.program_divide_max_p)
             if p_max < p_min:
                 p_max = p_min
             p_divide = cp.clip(
-                self.rd_divide_base_p + self.rd_divide_boost * (v_signal - self.rd_divide_center),
+                self.rd_divide_base_p + self.rd_divide_boost * (u_signal - self.rd_divide_center),
                 p_min,
                 p_max,
             )
@@ -2893,11 +2936,11 @@ class CellGrowth3D:
         large_cells_threshold: int = DEFAULT_MOVIE_LARGE_CELLS_THRESHOLD,
         large_interp_frames: int = DEFAULT_MOVIE_LARGE_INTERP_FRAMES,
         max_render_cells: Optional[int] = DEFAULT_MOVIE_MAX_RENDER_CELLS,
-        interp_frames: int = 8,
+        interp_frames: int = 2,
         fps: int = 24,
         movie_duration_seconds: Optional[float] = DEFAULT_MOVIE_DURATION_SECONDS,
         show_centers: bool = False,
-        color_by: str = "v",
+        color_by: str = "u",
         cmap: str = "viridis",
         opacity: float = 1.0,
         sphere_theta: int = DEFAULT_MOVIE_SPHERE_THETA,
@@ -3128,7 +3171,7 @@ class CellGrowth3D:
             float(mins[2]),
             float(maxs[2]),
         )
-        view_dir = np.array([1.0, 1.0, 1.0], dtype=float)
+        view_dir = np.array([-1.0, -1.0, 1.0], dtype=float)
         view_dir /= np.linalg.norm(view_dir)
         cam_distance = max(4.0 * fit_radius, 1.0)
         camera_position = [
@@ -3456,6 +3499,7 @@ class CellGrowth3D:
             enable_reaction_diffusion=np.int8(1 if self.enable_reaction_diffusion else 0),
             R_signal=np.float32(self.R_signal),
             rd_dt=np.float32(self.rd_dt),
+            rd_substeps=np.int32(self.rd_substeps),
             Du=np.float32(self.Du),
             Dv=np.float32(self.Dv),
             rd_model=np.asarray(self.rd_model),
@@ -3678,8 +3722,18 @@ def _build_cli() -> argparse.ArgumentParser:
         default=DEFAULT_RD_MODEL,
         help="Reaction-diffusion kinetics model",
     )
-    parser.add_argument("--gs-F", type=float, default=DEFAULT_GS_F, help="Gray-Scott feed rate F")
-    parser.add_argument("--gs-k", type=float, default=DEFAULT_GS_K, help="Gray-Scott kill rate k")
+    parser.add_argument(
+        "--gs-F",
+        type=float,
+        default=DEFAULT_GS_F,
+        help="RD parameter a in du/dt..dv/dt terms: +a*(1-v) and -(a+b)*u",
+    )
+    parser.add_argument(
+        "--gs-k",
+        type=float,
+        default=DEFAULT_GS_K,
+        help="RD parameter b in the -(a+b)*u term",
+    )
     parser.add_argument(
         "--R-signal",
         type=float,
@@ -3687,6 +3741,12 @@ def _build_cli() -> argparse.ArgumentParser:
         help="Neighbor radius for RD graph diffusion (default: density radius)",
     )
     parser.add_argument("--rd-dt", type=float, default=DEFAULT_RD_DT, help="RD integration timestep")
+    parser.add_argument(
+        "--rd-substeps",
+        type=int,
+        default=DEFAULT_RD_SUBSTEPS,
+        help="Number of RD timesteps per cell timestep",
+    )
     parser.add_argument("--rd-noise", type=float, default=DEFAULT_RD_NOISE, help="RD additive noise amplitude")
     parser.add_argument(
         "--rd-init-mode",
@@ -3726,7 +3786,7 @@ def _build_cli() -> argparse.ArgumentParser:
         "--rd-divide-center",
         type=float,
         default=DEFAULT_RD_DIVIDE_CENTER,
-        help="v center for RD divide gating (lower than center increases division)",
+        help="u center for RD divide gating (higher than center increases division)",
     )
     parser.add_argument(
         "--rd-divide-min-p",
@@ -3750,19 +3810,19 @@ def _build_cli() -> argparse.ArgumentParser:
         "--rd-apoptosis-boost",
         type=float,
         default=DEFAULT_RD_APOPTOSIS_BOOST,
-        help="RD apoptosis boost: higher v increases apoptosis probability",
+        help="RD apoptosis boost: lower u increases apoptosis probability",
     )
     parser.add_argument(
         "--rd-apoptosis-base-p",
         type=float,
         default=DEFAULT_RD_APOPTOSIS_BASE_P,
-        help="Baseline RD apoptosis probability before v-dependent boost",
+        help="Baseline RD apoptosis probability before u-dependent boost",
     )
     parser.add_argument(
         "--rd-apoptosis-center",
         type=float,
         default=DEFAULT_RD_APOPTOSIS_CENTER,
-        help="v center around which RD apoptosis boost is applied",
+        help="u center around which RD apoptosis boost is applied",
     )
     parser.add_argument(
         "--rd-apoptosis-min-p",
@@ -4013,6 +4073,7 @@ def main() -> None:
         enable_reaction_diffusion=args.reaction_diffusion,
         R_signal=args.R_signal,
         rd_dt=args.rd_dt,
+        rd_substeps=args.rd_substeps,
         Du=args.Du,
         Dv=args.Dv,
         rd_model=args.rd_model,
@@ -4055,6 +4116,7 @@ def main() -> None:
         "Reaction-diffusion: "
         f"enabled={sim.enable_reaction_diffusion}, model={sim.rd_model}, "
         f"R_signal={sim.R_signal:g}, Du={sim.Du:g}, Dv={sim.Dv:g}, "
+        f"dt={sim.rd_dt:g}, substeps={sim.rd_substeps}, "
         f"F={sim.gs_F:g}, k={sim.gs_k:g}, start_step={sim.rd_start_step}"
     )
     if sim.enable_reaction_diffusion:
