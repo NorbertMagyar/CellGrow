@@ -34,96 +34,105 @@ except Exception:  # pragma: no cover - fallback only when CuPy is unavailable
 
 ActionRule = Callable[[cp.ndarray, int], cp.ndarray]
 
-DEFAULT_STEPS = 100
-DEFAULT_SHOW = True
-DEFAULT_COLOR_BY = "u"
-DEFAULT_CROWDING_STAY_THRESHOLD = 12
-DEFAULT_CROWDING_DEATH_THRESHOLD = 16
-DEFAULT_NEIGHBORHOOD_RADIUS_FACTOR = 2.1
-DEFAULT_OVERLAP_RELAX_ITERS = 8
-DEFAULT_DIVISION_DIRECTION_MODE = "tangential"
-DEFAULT_OUTPUT_STEM = (
+# Main simulation controls
+#==========================================================================
+DEFAULT_STEPS = 30  # Number of simulation timesteps.
+DEFAULT_CROWDING_STAY_THRESHOLD = 12  # Neighbor count above which cells stop dividing.
+DEFAULT_CROWDING_DEATH_THRESHOLD = 16  # Neighbor count at/above which cells die.
+DEFAULT_NEIGHBORHOOD_RADIUS_FACTOR = 2.1  # Multiplier for density_radius relative to cell radius.
+DEFAULT_OVERLAP_RELAX_ITERS = 10  # Iterations of local spring relaxer per simulation step.
+DEFAULT_DIVISION_DIRECTION_MODE = "tangential"  # Division direction mode; options: least_resistance, tangential, radial.
+
+# I/O knobs
+#============================================================================
+DEFAULT_SHOW = True  # Show interactive PyVista window at end of run.
+DEFAULT_COLOR_BY = "order"  # Static color mode; options: order, radius, solid, u, v, prog, age, pz.
+DEFAULT_OUTPUT_STEM = (  # Base filename stem used by default output paths.
     f"cell_growth_"
     f"cr_{DEFAULT_CROWDING_STAY_THRESHOLD}_"
     f"de_{DEFAULT_CROWDING_DEATH_THRESHOLD}_"
     f"dir_{DEFAULT_DIVISION_DIRECTION_MODE}"
 )
-DEFAULT_SAVE_DATA = True
-DEFAULT_DATA_PATH = f"{DEFAULT_OUTPUT_STEM}.npz"
-DEFAULT_SAVE_SNAPSHOT = False
-DEFAULT_SNAPSHOT_PATH = f"{DEFAULT_OUTPUT_STEM}.png"
-DEFAULT_SAVE_MOVIE = True
-DEFAULT_MOVIE_PATH = f"{DEFAULT_OUTPUT_STEM}.mp4"
-DEFAULT_MOVIE_FPS = 24
-DEFAULT_MOVIE_DURATION_SECONDS: Optional[float] = 10
-DEFAULT_INTERP_FRAMES = 1
-DEFAULT_MOVIE_WIDTH = 1024
-DEFAULT_MOVIE_HEIGHT = 860
-DEFAULT_MOVIE_SPHERE_THETA = 16
-DEFAULT_MOVIE_SPHERE_PHI = 16
-DEFAULT_MOVIE_SHOW_EDGES = False
-DEFAULT_MOVIE_EDGE_COLOR = "#000000"
-DEFAULT_MOVIE_EDGE_WIDTH = 0.6
-DEFAULT_MOVIE_MACRO_BLOCK_SIZE = 16
-DEFAULT_MOVIE_DEATH_ANIMATION = "shrink"
-DEFAULT_TIMING = False
-DEFAULT_TIMING_SYNC_GPU = True
-DEFAULT_MOVIE_ADAPTIVE_LARGE = True
-DEFAULT_MOVIE_LARGE_CELLS_THRESHOLD = 8000
-DEFAULT_MOVIE_LARGE_INTERP_FRAMES = 2
-DEFAULT_MOVIE_MAX_RENDER_CELLS = 18000
-DEFAULT_VIEW_MAX_RENDER_CELLS = 20000
-DEFAULT_ENABLE_CELL_PROGRAM = True
-DEFAULT_ENABLE_PROGRAM_DIVISION_MODULATION = True
-DEFAULT_PROGRAM_TAU_BIRTH = 1
-DEFAULT_PROGRAM_TAU_CYCLE = 1
-DEFAULT_PROGRAM_W_BIRTH = 1.0
-DEFAULT_PROGRAM_W_CYCLE = 1.0
-DEFAULT_PROGRAM_SURFACE_GAIN = 1.0
-DEFAULT_PROGRAM_CROWD_GAIN = 1.0
-DEFAULT_PROGRAM_NOISE = 0.01
-DEFAULT_PROGRAM_SIGMOID_CENTER = 0.1
-DEFAULT_PROGRAM_SIGMOID_SLOPE = 3.0
-DEFAULT_PROGRAM_RADIAL_SIGN = "outward"
-DEFAULT_PROGRAM_DIVIDE_BOOST = 1.0
-DEFAULT_PROGRAM_DIVIDE_MIN_P = 0.0
-DEFAULT_PROGRAM_DIVIDE_MAX_P = 1.0
-DEFAULT_PROGRAM_SUMMARY = True
-DEFAULT_ENABLE_APOPTOSIS = False
-DEFAULT_APOPTOSIS_AGE = 10
-DEFAULT_ENABLE_REACTION_DIFFUSION = True
-DEFAULT_RD_START_STEP = 15
-DEFAULT_RD_DT = 0.1
-DEFAULT_RD_SUBSTEPS = 100
-DEFAULT_RD_DU = 0.1
-DEFAULT_RD_DV = 0.2
-DEFAULT_GS_F = 0.037
-DEFAULT_GS_K = 0.06
-DEFAULT_RD_MODEL = "gray_scott"
-DEFAULT_RD_CLAMP = True
-DEFAULT_RD_NOISE = 0.0
-DEFAULT_RD_INIT_MODE = "seed_random_cells"
-DEFAULT_RD_SEED_AMP = 1.0
-DEFAULT_RD_SEED_FRAC = 0.1
-DEFAULT_RD_PRINT_STATS_EVERY = 50
-DEFAULT_RD_COUPLE_TO_PROG = True
-DEFAULT_RD_PROG_FROM = "u"
-DEFAULT_RD_PROG_GAIN = 0.01
-DEFAULT_RD_PROG_CENTER = 0.1
-DEFAULT_DIVIDE_BASE_P = 0.0
-DEFAULT_RD_DIVIDE_BOOST = 0
-DEFAULT_RD_DIVIDE_CENTER = 0.25
-DEFAULT_RD_DIVIDE_MIN_P = 0.0
-DEFAULT_RD_DIVIDE_MAX_P = 1.0
-DEFAULT_RD_APOPTOSIS_BOOST = 0
-DEFAULT_RD_APOPTOSIS_BASE_P = 0.0
-DEFAULT_RD_APOPTOSIS_CENTER = 0.0
-DEFAULT_RD_APOPTOSIS_MIN_P = 0.0
-DEFAULT_RD_APOPTOSIS_MAX_P = 0.5
-DEFAULT_RD_INTERIOR_PROTECTION = True
-DEFAULT_RD_INTERIOR_APOPTOSIS_SHIELD = 1.0
-DEFAULT_RD_INTERIOR_DIVIDE_DAMP = 1.0
-DEFAULT_RD_INTERIOR_CROWD_WEIGHT = 0.5
+DEFAULT_SAVE_DATA = True  # Save final state to NPZ by default.
+DEFAULT_DATA_PATH = f"{DEFAULT_OUTPUT_STEM}.npz"  # Default NPZ output path.
+DEFAULT_SAVE_SNAPSHOT = False  # Save final snapshot image by default.
+DEFAULT_SNAPSHOT_PATH = f"{DEFAULT_OUTPUT_STEM}.png"  # Default snapshot output path.
+DEFAULT_SAVE_MOVIE = False  # Render and save movie by default.
+DEFAULT_MOVIE_PATH = f"{DEFAULT_OUTPUT_STEM}.mp4"  # Default movie output path.
+DEFAULT_MOVIE_FPS = 24  # Default movie FPS when not auto-scaled.
+DEFAULT_MOVIE_DURATION_SECONDS: Optional[float] = 10  # Target duration (seconds) for auto FPS scaling; set None to disable.
+DEFAULT_INTERP_FRAMES = 20  # Interpolated frames between simulation steps in movie mode.
+DEFAULT_MOVIE_WIDTH = 1024  # Movie frame width (px).
+DEFAULT_MOVIE_HEIGHT = 860  # Movie frame height (px).
+DEFAULT_MOVIE_SPHERE_THETA = 16  # Sphere theta tessellation in movie rendering.
+DEFAULT_MOVIE_SPHERE_PHI = 16  # Sphere phi tessellation in movie rendering.
+DEFAULT_MOVIE_SHOW_EDGES = False  # Render sphere mesh edges in movies.
+DEFAULT_MOVIE_EDGE_COLOR = "#000000"  # Edge color when movie edges are enabled.
+DEFAULT_MOVIE_EDGE_WIDTH = 0.6  # Edge line width when movie edges are enabled.
+DEFAULT_MOVIE_MACRO_BLOCK_SIZE = 16  # MP4 encoder macro block size.
+DEFAULT_MOVIE_DEATH_ANIMATION = "shrink"  # Death animation; options: none, fade, shrink, fade_shrink.
+DEFAULT_TIMING = False  # Print per-step timing breakdown.
+DEFAULT_TIMING_SYNC_GPU = True  # Synchronize GPU before timing marks for accurate timings.
+DEFAULT_MOVIE_ADAPTIVE_LARGE = True  # Enable adaptive movie settings for large colonies.
+DEFAULT_MOVIE_LARGE_CELLS_THRESHOLD = 8000  # Cell-count threshold for adaptive movie behavior.
+DEFAULT_MOVIE_LARGE_INTERP_FRAMES = 2  # Interp frame count used after adaptive threshold.
+DEFAULT_MOVIE_MAX_RENDER_CELLS = 18000  # Max cells rendered per movie frame (sampling above this).
+DEFAULT_VIEW_MAX_RENDER_CELLS = 20000  # Max cells rendered in static final view.
+
+# Reaction-Diffusion calculation across cells
+#==============================================================================
+DEFAULT_ENABLE_REACTION_DIFFUSION = True  # Enable reaction-diffusion subsystem.
+DEFAULT_RD_START_STEP = 30  # Step index when RD starts affecting dynamics.
+DEFAULT_RD_DT = 0.1  # RD integrator timestep. Forward Euler solver
+DEFAULT_RD_SUBSTEPS = 30  # RD substeps per cell timestep.
+DEFAULT_RD_DU = 0.1  # RD diffusion coefficient for u.
+DEFAULT_RD_DV = 0.2  # RD diffusion coefficient for v.
+# Values inspired by: https://visualpde.com/nonlinear-physics/gray-scott.html
+DEFAULT_GS_F = 0.03  # Gray-Scott parameter a (feed-like term in this formulation).
+DEFAULT_GS_K = 0.065  # Gray-Scott parameter b (kill-like term in this formulation).
+DEFAULT_RD_MODEL = "gray_scott"  # RD kinetics model; options: gray_scott.
+DEFAULT_RD_CLAMP = True  # Clamp RD fields to [0,1] each substep.
+DEFAULT_RD_NOISE = 0.0  # Additive RD noise amplitude.
+DEFAULT_RD_INIT_MODE = "seed_random_cells"  # RD seeding mode; options: uniform_noise, seed_center, seed_random_cells.
+DEFAULT_RD_SEED_AMP = 1.0  # RD seed perturbation amplitude.
+DEFAULT_RD_SEED_FRAC = 0.1  # Fraction of seeded cells in seed_random_cells mode.
+DEFAULT_RD_PRINT_STATS_EVERY = 50  # RD diagnostics print interval (steps; 0 disables).
+DEFAULT_RD_COUPLE_TO_PROG = True  # Map RD signal to division program scalar.
+DEFAULT_RD_PROG_FROM = "u"  # Legacy (ignored): program scalar is now always sigmoid(u).
+DEFAULT_RD_PROG_GAIN = 0.01  # Legacy (ignored): program scalar is now always sigmoid(u).
+DEFAULT_RD_PROG_CENTER = 0.1  # Legacy (ignored): program scalar is now always sigmoid(u).
+DEFAULT_DIVIDE_BASE_P = 0.0  # Baseline division probability before RD boost.
+DEFAULT_RD_DIVIDE_BOOST = 1  # Strength of RD-driven division boost.
+DEFAULT_RD_DIVIDE_CENTER = 0.3  # RD center for division boost response.
+DEFAULT_RD_DIVIDE_MIN_P = 0.0  # Lower cap for RD-driven division probability.
+DEFAULT_RD_DIVIDE_MAX_P = 1.0  # Upper cap for RD-driven division probability.
+DEFAULT_RD_APOPTOSIS_BOOST = 0  # Strength of RD-driven apoptosis boost.
+DEFAULT_RD_APOPTOSIS_BASE_P = 0.0  # Baseline RD apoptosis probability.
+DEFAULT_RD_APOPTOSIS_CENTER = 0.1  # RD center for apoptosis boost response.
+DEFAULT_RD_APOPTOSIS_MIN_P = 0.0  # Lower cap for RD-driven apoptosis probability.
+DEFAULT_RD_APOPTOSIS_MAX_P = 0.5  # Upper cap for RD-driven apoptosis probability.
+DEFAULT_RD_INTERIOR_PROTECTION = False  # Enable interior-protection modifiers for RD gating.
+DEFAULT_RD_INTERIOR_APOPTOSIS_SHIELD = 1.0  # Strength of interior suppression on RD apoptosis.
+DEFAULT_RD_INTERIOR_DIVIDE_DAMP = 1.0  # Strength of interior damping on RD division.
+DEFAULT_RD_INTERIOR_CROWD_WEIGHT = 0.5  # Crowding weight in interior-score computation.
+DEFAULT_ENABLE_APOPTOSIS = False  # Enable age-based apoptosis.
+DEFAULT_APOPTOSIS_AGE = 10  # Birth-age threshold for apoptosis.
+
+# Polarity - preferential division axis for cells. Options to align polarity between cells and for RD variables to influence polarity
+#====================================================================================
+DEFAULT_ENABLE_POLARITY = False  # Enable polarity vector dynamics.
+DEFAULT_POLARITY_NOISE = 0.01  # Per-step polarity noise amplitude.
+DEFAULT_POLARITY_ALIGN_ALPHA0 = 1.0  # Baseline polarity neighbor-alignment strength.
+DEFAULT_POLARITY_ALIGN_ALPHA_U = 1.0  # Extra polarity alignment strength scaled by local u.
+DEFAULT_POLARITY_RADIUS: Optional[float] = None  # Polarity neighbor radius (None -> use R_signal).
+DEFAULT_POLARITY_PROJECT_TO_TANGENT = False  # Project polarity updates onto local tangent plane.
+DEFAULT_POLARITY_USE_U_GRADIENT = True  # Blend local u-gradient into polarity update.
+DEFAULT_POLARITY_GRAD_GAIN = 0.4  # Blend gain for u-gradient contribution in polarity update.
+DEFAULT_POLARITY_MIX_PREV = 0.0  # Temporal inertia of polarity (0=new only, 1=keep previous).
+DEFAULT_FORCE_DIVISION_DIRECTION: Optional[str] = None  # Fixed global division axis as 'x,y,z' string; None disables override.
+
+# The relaxation step (pushing or pulling cells to split_distance) enforces alignment of cells
+DEFAULT_RELAX_PROJECTION_MODE = "none"  # Relaxer displacement projection mode; options: none, force_dir, polarity.
 
 GPU_RAW_KERNELS_SRC = r"""
 __device__ inline float maxf_(const float a, const float b) {
@@ -283,6 +292,103 @@ void neighbor_mean2_kernel(
         out_mean0[i] = s0[i];
         out_mean1[i] = s1[i];
     }
+}
+
+extern "C" __global__
+void polarity_stats_kernel(
+    const float* pos,
+    const long long* sort_idx,
+    const long long* start_lut,
+    const int* count_lut,
+    const float* origin,
+    const long long* min_cell,
+    const long long* max_cell,
+    const float cell_size,
+    const long long stride_x,
+    const long long stride_y,
+    const int span,
+    const float radius2,
+    const int n,
+    const float eps,
+    const float* p,
+    const float* u,
+    float* out_mean_p,
+    float* out_grad_u,
+    int* out_counts
+) {
+    const int i = (int)(blockDim.x * blockIdx.x + threadIdx.x);
+    if (i >= n) return;
+
+    const float xi = pos[3 * i + 0];
+    const float yi = pos[3 * i + 1];
+    const float zi = pos[3 * i + 2];
+
+    const long long cix = (long long)floorf((xi - origin[0]) / cell_size);
+    const long long ciy = (long long)floorf((yi - origin[1]) / cell_size);
+    const long long ciz = (long long)floorf((zi - origin[2]) / cell_size);
+
+    float sum_px = 0.0f;
+    float sum_py = 0.0f;
+    float sum_pz = 0.0f;
+    float gx = 0.0f;
+    float gy = 0.0f;
+    float gz = 0.0f;
+    int count = 0;
+    const float ui = u[i];
+    const float eps2 = eps * eps;
+
+    for (int dx = -span; dx <= span; ++dx) {
+        const long long nx = cix + (long long)dx;
+        if (nx < min_cell[0] || nx > max_cell[0]) continue;
+        for (int dy = -span; dy <= span; ++dy) {
+            const long long ny = ciy + (long long)dy;
+            if (ny < min_cell[1] || ny > max_cell[1]) continue;
+            for (int dz = -span; dz <= span; ++dz) {
+                const long long nz = ciz + (long long)dz;
+                if (nz < min_cell[2] || nz > max_cell[2]) continue;
+
+                const long long key = (nx - min_cell[0]) * stride_x + (ny - min_cell[1]) * stride_y + (nz - min_cell[2]);
+                const long long start = start_lut[key];
+                if (start < 0) continue;
+                const int c = count_lut[key];
+                for (int t = 0; t < c; ++t) {
+                    const int j = (int)sort_idx[start + (long long)t];
+                    if (j == i) continue;
+                    const float dx_ = pos[3 * j + 0] - xi;
+                    const float dy_ = pos[3 * j + 1] - yi;
+                    const float dz_ = pos[3 * j + 2] - zi;
+                    const float d2 = dx_ * dx_ + dy_ * dy_ + dz_ * dz_;
+                    if (d2 > radius2) continue;
+
+                    sum_px += p[3 * j + 0];
+                    sum_py += p[3 * j + 1];
+                    sum_pz += p[3 * j + 2];
+
+                    const float du = u[j] - ui;
+                    const float inv_d = rsqrtf(maxf_(d2, eps2));
+                    gx += du * dx_ * inv_d;
+                    gy += du * dy_ * inv_d;
+                    gz += du * dz_ * inv_d;
+                    count += 1;
+                }
+            }
+        }
+    }
+
+    out_counts[i] = count;
+    if (count > 0) {
+        const float inv = 1.0f / (float)count;
+        out_mean_p[3 * i + 0] = sum_px * inv;
+        out_mean_p[3 * i + 1] = sum_py * inv;
+        out_mean_p[3 * i + 2] = sum_pz * inv;
+    } else {
+        out_mean_p[3 * i + 0] = p[3 * i + 0];
+        out_mean_p[3 * i + 1] = p[3 * i + 1];
+        out_mean_p[3 * i + 2] = p[3 * i + 2];
+    }
+    out_grad_u[3 * i + 0] = gx;
+    out_grad_u[3 * i + 1] = gy;
+    out_grad_u[3 * i + 2] = gz;
 }
 
 extern "C" __global__
@@ -750,22 +856,16 @@ class CellGrowth3D:
     dtype: str = "float32"
     enable_step_timing: bool = False
     sync_timing_gpu: bool = True
-    enable_cell_program: bool = DEFAULT_ENABLE_CELL_PROGRAM
-    program_tau_birth: float = DEFAULT_PROGRAM_TAU_BIRTH
-    program_tau_cycle: float = DEFAULT_PROGRAM_TAU_CYCLE
-    program_w_birth: float = DEFAULT_PROGRAM_W_BIRTH
-    program_w_cycle: float = DEFAULT_PROGRAM_W_CYCLE
     program_surface_gain: float = DEFAULT_PROGRAM_SURFACE_GAIN
     program_crowd_gain: float = DEFAULT_PROGRAM_CROWD_GAIN
-    program_noise: float = DEFAULT_PROGRAM_NOISE
-    program_sigmoid_center: float = DEFAULT_PROGRAM_SIGMOID_CENTER
-    program_sigmoid_slope: float = DEFAULT_PROGRAM_SIGMOID_SLOPE
-    program_radial_sign: str = DEFAULT_PROGRAM_RADIAL_SIGN
-    enable_program_division_modulation: bool = DEFAULT_ENABLE_PROGRAM_DIVISION_MODULATION
-    program_divide_boost: float = DEFAULT_PROGRAM_DIVIDE_BOOST
-    program_divide_min_p: float = DEFAULT_PROGRAM_DIVIDE_MIN_P
-    program_divide_max_p: float = DEFAULT_PROGRAM_DIVIDE_MAX_P
-    print_program_summary: bool = DEFAULT_PROGRAM_SUMMARY
+    program_noise: float = DEFAULT_RD_NOISE
+    program_sigmoid_center: float = 0.0
+    program_sigmoid_slope: float = 1.0
+    program_radial_sign: str = "outward"
+    program_divide_boost: float = DEFAULT_RD_DIVIDE_BOOST
+    program_divide_min_p: float = DEFAULT_RD_DIVIDE_MIN_P
+    program_divide_max_p: float = DEFAULT_RD_DIVIDE_MAX_P
+    print_program_summary: bool = True
     enable_apoptosis: bool = DEFAULT_ENABLE_APOPTOSIS
     apoptosis_age: int = DEFAULT_APOPTOSIS_AGE
     enable_reaction_diffusion: bool = DEFAULT_ENABLE_REACTION_DIFFUSION
@@ -802,6 +902,17 @@ class CellGrowth3D:
     rd_interior_apoptosis_shield: float = DEFAULT_RD_INTERIOR_APOPTOSIS_SHIELD
     rd_interior_divide_damp: float = DEFAULT_RD_INTERIOR_DIVIDE_DAMP
     rd_interior_crowd_weight: float = DEFAULT_RD_INTERIOR_CROWD_WEIGHT
+    enable_polarity: bool = DEFAULT_ENABLE_POLARITY
+    polarity_noise: float = DEFAULT_POLARITY_NOISE
+    polarity_align_alpha0: float = DEFAULT_POLARITY_ALIGN_ALPHA0
+    polarity_align_alpha_u: float = DEFAULT_POLARITY_ALIGN_ALPHA_U
+    polarity_radius: Optional[float] = DEFAULT_POLARITY_RADIUS
+    polarity_project_to_tangent: bool = DEFAULT_POLARITY_PROJECT_TO_TANGENT
+    polarity_use_u_gradient: bool = DEFAULT_POLARITY_USE_U_GRADIENT
+    polarity_grad_gain: float = DEFAULT_POLARITY_GRAD_GAIN
+    polarity_mix_prev: float = DEFAULT_POLARITY_MIX_PREV
+    force_division_direction: Optional[str] = DEFAULT_FORCE_DIVISION_DIRECTION
+    relax_projection_mode: str = DEFAULT_RELAX_PROJECTION_MODE
 
     def __post_init__(self) -> None:
         if self.radius <= 0:
@@ -858,6 +969,18 @@ class CellGrowth3D:
             raise ValueError("rd_interior_divide_damp must be in [0,1]")
         if not (0.0 <= self.rd_interior_crowd_weight <= 1.0):
             raise ValueError("rd_interior_crowd_weight must be in [0,1]")
+        if self.polarity_noise < 0:
+            raise ValueError("polarity_noise must be >= 0")
+        if not (0.0 <= self.polarity_align_alpha0 <= 1.0):
+            raise ValueError("polarity_align_alpha0 must be in [0,1]")
+        if not (0.0 <= self.polarity_align_alpha_u <= 1.0):
+            raise ValueError("polarity_align_alpha_u must be in [0,1]")
+        if self.polarity_radius is not None and self.polarity_radius <= 0:
+            raise ValueError("polarity_radius must be > 0 when set")
+        if not (0.0 <= self.polarity_grad_gain <= 1.0):
+            raise ValueError("polarity_grad_gain must be in [0,1]")
+        if not (0.0 <= self.polarity_mix_prev <= 1.0):
+            raise ValueError("polarity_mix_prev must be in [0,1]")
 
         valid_dir_modes = {"least_resistance", "tangential", "radial"}
         if self.division_direction_mode not in valid_dir_modes:
@@ -877,25 +1000,20 @@ class CellGrowth3D:
         valid_prog_from = {"u", "v", "u_minus_v", "v_minus_u"}
         if self.rd_prog_from not in valid_prog_from:
             raise ValueError(f"rd_prog_from must be one of {sorted(valid_prog_from)}")
-        if self.program_tau_birth <= 0:
-            raise ValueError("program_tau_birth must be > 0")
-        if self.program_tau_cycle <= 0:
-            raise ValueError("program_tau_cycle must be > 0")
-        if self.program_sigmoid_slope <= 0:
-            raise ValueError("program_sigmoid_slope must be > 0")
-        if self.program_noise < 0:
-            raise ValueError("program_noise must be >= 0")
-        valid_program_radial = {"inward", "outward"}
-        if self.program_radial_sign not in valid_program_radial:
+        valid_relax_projection = {"none", "force_dir", "polarity"}
+        if self.relax_projection_mode not in valid_relax_projection:
             raise ValueError(
-                f"program_radial_sign must be one of {sorted(valid_program_radial)}"
+                f"relax_projection_mode must be one of {sorted(valid_relax_projection)}"
             )
-        if not (0.0 <= self.program_divide_min_p <= 1.0):
-            raise ValueError("program_divide_min_p must be in [0, 1]")
-        if not (0.0 <= self.program_divide_max_p <= 1.0):
-            raise ValueError("program_divide_max_p must be in [0, 1]")
-        if self.program_divide_max_p < self.program_divide_min_p:
-            raise ValueError("program_divide_max_p must be >= program_divide_min_p")
+
+        # Legacy program knobs are now aliases to RD controls.
+        self.program_noise = float(self.rd_noise)
+        self.program_sigmoid_center = 0.0
+        self.program_sigmoid_slope = 1.0
+        self.program_radial_sign = "inward" if self.radial_sign == "inward" else "outward"
+        self.program_divide_boost = float(self.rd_divide_boost)
+        self.program_divide_min_p = float(self.rd_divide_min_p)
+        self.program_divide_max_p = float(self.rd_divide_max_p)
 
         self.overlap_cutoff = float(2.0 * self.radius * (1.0 + self.overlap_margin))
         if self.density_radius is None:
@@ -926,6 +1044,24 @@ class CellGrowth3D:
             self.spring_max_step = float(0.25 * self.radius)
         if self.spring_max_step <= 0:
             raise ValueError("spring_max_step must be > 0")
+        self._force_division_dir_np: Optional[np.ndarray] = None
+        if self.force_division_direction is not None:
+            text = str(self.force_division_direction).strip()
+            if text:
+                parts = [p.strip() for p in text.split(",")]
+                if len(parts) != 3:
+                    raise ValueError(
+                        "force_division_direction must be formatted as 'x,y,z'"
+                    )
+                vec = np.asarray([float(parts[0]), float(parts[1]), float(parts[2])], dtype=float)
+                nrm = float(np.linalg.norm(vec))
+                if nrm <= self.eps:
+                    raise ValueError("force_division_direction norm must be > 0")
+                self._force_division_dir_np = (vec / nrm).astype(np.float32, copy=False)
+        if self.relax_projection_mode == "force_dir" and self._force_division_dir_np is None:
+            raise ValueError(
+                "relax_projection_mode='force_dir' requires force_division_direction to be set"
+            )
 
         self.points = cp.zeros((1, 3), dtype=self.dtype)
         self.cell_ids = cp.zeros((1,), dtype=cp.int64)
@@ -934,31 +1070,25 @@ class CellGrowth3D:
         self.cell_prog = cp.zeros((1,), dtype=self.dtype)
         self.u = cp.ones((1,), dtype=self.dtype)
         self.v = cp.zeros((1,), dtype=self.dtype)
+        self._rng = cp.random.RandomState(self.seed)
+        self._rng_np = np.random.RandomState(self.seed)
+        self.p = self._random_unit_vectors_backend(1, cp, self.dtype).astype(self.dtype, copy=False)
         self._next_cell_id = 1
         self.step_index = 0
         self.count_history = [1]
-        self._rng = cp.random.RandomState(self.seed)
-        self._rng_np = np.random.RandomState(self.seed)
         self._offset_cache_np: dict[int, np.ndarray] = {}
         self._offset_cache_cp: dict[int, cp.ndarray] = {}
         self.last_step_timing: Optional[dict[str, float]] = None
         self.step_timing_history: list[dict[str, float]] = []
         self.last_program_summary: Optional[dict[str, float]] = None
         self.last_rd_summary: Optional[dict[str, float]] = None
+        self.last_polarity_coherence: float = 0.0
         self._rd_reseed_done = False
         self._gpu_kernels_ready = False
         self._gpu_kernel_error: Optional[str] = None
         self._init_gpu_kernels()
         self._initialize_rd_state()
         self._assert_state_aligned()
-        if self.enable_cell_program:
-            print(
-                "Cell program enabled: "
-                f"tau_birth={self.program_tau_birth:g}, tau_cycle={self.program_tau_cycle:g}, "
-                f"w_birth={self.program_w_birth:g}, w_cycle={self.program_w_cycle:g}, "
-                f"surface_gain={self.program_surface_gain:g}, crowd_gain={self.program_crowd_gain:g}, "
-                f"noise={self.program_noise:g}, divide_boost={self.program_divide_boost:g}"
-            )
         if self.enable_reaction_diffusion:
             print(
                 "Reaction-diffusion enabled: "
@@ -966,6 +1096,12 @@ class CellGrowth3D:
                 f"substeps={self.rd_substeps}, Du={self.Du:g}, Dv={self.Dv:g}, "
                 f"F={self.gs_F:g}, k={self.gs_k:g}, "
                 f"start_step={self.rd_start_step}"
+            )
+        if self._force_division_dir_np is not None:
+            fx, fy, fz = self._force_division_dir_np.tolist()
+            print(
+                "Forced division direction enabled: "
+                f"[{fx:.4f}, {fy:.4f}, {fz:.4f}]"
             )
 
     @staticmethod
@@ -1077,7 +1213,8 @@ class CellGrowth3D:
             f"prog(min/mean/max)="
             f"{summary.get('prog_min', 0.0):.3f}/"
             f"{summary.get('prog_mean', 0.0):.3f}/"
-            f"{summary.get('prog_max', 0.0):.3f}"
+            f"{summary.get('prog_max', 0.0):.3f} | "
+            f"polarity_coherence={summary.get('polarity_coherence', 0.0):.3f}"
         )
 
     def _assert_state_aligned(self) -> None:
@@ -1094,12 +1231,15 @@ class CellGrowth3D:
             raise RuntimeError("Internal state mismatch: u length != points length")
         if int(self.v.shape[0]) != n:
             raise RuntimeError("Internal state mismatch: v length != points length")
+        if int(self.p.shape[0]) != n:
+            raise RuntimeError("Internal state mismatch: p length != points length")
 
     def _init_gpu_kernels(self) -> None:
         self._gpu_kernels_ready = False
         self._gpu_kernel_error = None
         self._kernel_neighbor_count = None
         self._kernel_neighbor_mean2 = None
+        self._kernel_polarity_stats = None
         self._kernel_local_resultant = None
         self._kernel_least_resistance = None
         self._kernel_overlap = None
@@ -1111,6 +1251,9 @@ class CellGrowth3D:
             )
             self._kernel_neighbor_mean2 = cp.RawKernel(
                 GPU_RAW_KERNELS_SRC, "neighbor_mean2_kernel"
+            )
+            self._kernel_polarity_stats = cp.RawKernel(
+                GPU_RAW_KERNELS_SRC, "polarity_stats_kernel"
             )
             self._kernel_local_resultant = cp.RawKernel(
                 GPU_RAW_KERNELS_SRC, "local_resultant_kernel"
@@ -1140,6 +1283,7 @@ class CellGrowth3D:
         self._gpu_kernel_error = str(exc)
         self._kernel_neighbor_count = None
         self._kernel_neighbor_mean2 = None
+        self._kernel_polarity_stats = None
         self._kernel_local_resultant = None
         self._kernel_least_resistance = None
         self._kernel_overlap = None
@@ -1226,6 +1370,231 @@ class CellGrowth3D:
 
     def _clip01_backend(self, x, xp_module):
         return xp_module.clip(x, 0.0, 1.0)
+
+    def _normalize_vec_rows(self, vecs, xp_module):
+        nrm = xp_module.sqrt(xp_module.sum(vecs * vecs, axis=1, keepdims=True))
+        return vecs / xp_module.maximum(nrm, self.eps)
+
+    def _neighbor_mean_vec3(
+        self,
+        points,
+        vec3,
+        radius: float,
+        grid: Optional[GridStruct] = None,
+    ):
+        """
+        Unweighted neighbor mean for a 3-vector field on the moving graph.
+
+        Uses grid candidates + exact distances (O(N*k) average).
+        """
+        xp_module = self._xp_of(points)
+        n = int(points.shape[0])
+        mean_vec = xp_module.zeros((n, 3), dtype=self.dtype)
+        counts = xp_module.zeros((n,), dtype=xp_module.int32)
+        if n == 0:
+            return mean_vec, counts
+
+        use_grid = grid if grid is not None else self._build_grid(points)
+        vals = vec3.astype(self.dtype, copy=False)
+        for i in range(n):
+            ids = self._neighbors_within_radius(i, points, use_grid, radius)
+            c = int(ids.shape[0])
+            counts[i] = c
+            if c > 0:
+                mean_vec[i] = xp_module.mean(vals[ids], axis=0)
+            else:
+                mean_vec[i] = vals[i]
+        return mean_vec.astype(self.dtype, copy=False), counts
+
+    def _neighbor_u_gradient(
+        self,
+        points,
+        u_vals,
+        radius: float,
+        grid: Optional[GridStruct] = None,
+    ):
+        """
+        Local graph gradient of u using exact neighbor vectors/distances.
+        """
+        xp_module = self._xp_of(points)
+        n = int(points.shape[0])
+        grad = xp_module.zeros((n, 3), dtype=self.dtype)
+        if n == 0:
+            return grad
+
+        use_grid = grid if grid is not None else self._build_grid(points)
+        u = u_vals.astype(self.dtype, copy=False)
+        for i in range(n):
+            _ids, vecs, dists = self._neighbor_data_within_radius(i, points, use_grid, radius)
+            if dists.size == 0:
+                continue
+            du = u[_ids] - u[i]
+            contrib = (du[:, None] * vecs) / xp_module.maximum(dists[:, None], self.eps)
+            grad[i] = xp_module.sum(contrib, axis=0)
+        return grad.astype(self.dtype, copy=False)
+
+    def _neighbor_polarity_stats(
+        self,
+        points,
+        p_vals,
+        u_vals,
+        radius: float,
+        grid: Optional[GridStruct] = None,
+    ):
+        """
+        Fused neighbor pass for polarity update:
+        - mean neighbor polarity vector
+        - local u-graph gradient
+        - neighbor counts
+        """
+        xp_module = self._xp_of(points)
+        n = int(points.shape[0])
+        mean_p = xp_module.zeros((n, 3), dtype=self.dtype)
+        grad_u = xp_module.zeros((n, 3), dtype=self.dtype)
+        counts = xp_module.zeros((n,), dtype=xp_module.int32)
+        if n == 0:
+            return mean_p, grad_u, counts
+
+        use_grid = grid if grid is not None else self._build_grid(points)
+        p_loc = p_vals.astype(self.dtype, copy=False)
+        u_loc = u_vals.astype(self.dtype, copy=False)
+
+        if self.fast_neighbors and self._gpu_fast_path_available(points):
+            try:
+                start_lut, count_lut = self._ensure_grid_lookup(use_grid, cp)
+                span = max(1, int(np.ceil(float(radius) / max(use_grid.cell_size, self.eps))))
+                blocks, threads = self._launch_cfg_1d(n)
+                self._kernel_polarity_stats(
+                    blocks,
+                    threads,
+                    (
+                        points,
+                        use_grid.sort_idx,
+                        start_lut,
+                        count_lut,
+                        use_grid.origin,
+                        use_grid.min_cell,
+                        use_grid.max_cell,
+                        np.float32(use_grid.cell_size),
+                        np.int64(use_grid.stride_x),
+                        np.int64(use_grid.stride_y),
+                        np.int32(span),
+                        np.float32(radius * radius),
+                        np.int32(n),
+                        np.float32(self.eps),
+                        p_loc,
+                        u_loc,
+                        mean_p,
+                        grad_u,
+                        counts,
+                    ),
+                )
+                return (
+                    mean_p.astype(self.dtype, copy=False),
+                    grad_u.astype(self.dtype, copy=False),
+                    counts.astype(cp.int32, copy=False),
+                )
+            except Exception as exc:
+                self._disable_gpu_kernels(exc)
+
+        for i in range(n):
+            ids, vecs, dists = self._neighbor_data_within_radius(i, points, use_grid, radius)
+            c = int(ids.shape[0])
+            counts[i] = c
+            if c > 0:
+                mean_p[i] = xp_module.mean(p_loc[ids], axis=0)
+                du = u_loc[ids] - u_loc[i]
+                contrib = (du[:, None] * vecs) / xp_module.maximum(dists[:, None], self.eps)
+                grad_u[i] = xp_module.sum(contrib, axis=0)
+            else:
+                mean_p[i] = p_loc[i]
+
+        return (
+            mean_p.astype(self.dtype, copy=False),
+            grad_u.astype(self.dtype, copy=False),
+            counts.astype(xp_module.int32, copy=False),
+        )
+
+    def _update_polarity(
+        self,
+        points,
+        v_hat,
+        *,
+        grid: Optional[GridStruct] = None,
+    ) -> float:
+        """
+        Update per-cell planar polarity vector with local alignment and optional u-gradient.
+        """
+        xp_module = self._xp_of(points)
+        n = int(points.shape[0])
+        if n == 0:
+            self.p = xp_module.zeros((0, 3), dtype=self.dtype)
+            return 0.0
+
+        radius = float(self.polarity_radius if self.polarity_radius is not None else self.R_signal)
+        use_grid = grid if grid is not None else self._build_grid(points)
+        p_old = self.p.astype(self.dtype, copy=False)
+        mean_p, grad, _ = self._neighbor_polarity_stats(
+            points,
+            p_old,
+            self.u,
+            radius,
+            grid=use_grid,
+        )
+        mean_p_dir = self._normalize_vec_rows(mean_p, xp_module)
+
+        u_clip = xp_module.clip(self.u.astype(self.dtype, copy=False), 0.0, 1.0)
+        alpha = xp_module.clip(
+            self.polarity_align_alpha0 + self.polarity_align_alpha_u * u_clip,
+            0.0,
+            1.0,
+        ).reshape(-1, 1)
+
+        p_prev_mix = self.polarity_mix_prev * p_old + (1.0 - self.polarity_mix_prev) * mean_p_dir
+        p_prev_mix = self._normalize_vec_rows(p_prev_mix, xp_module)
+        p_new = (1.0 - alpha) * p_prev_mix + alpha * mean_p
+        p_new = self._normalize_vec_rows(p_new, xp_module)
+
+        n_norm = xp_module.sqrt(xp_module.sum(v_hat * v_hat, axis=1, keepdims=True))
+        n_unit = xp_module.zeros_like(v_hat)
+        valid_n = n_norm[:, 0] > self.eps
+        if self._any_true(valid_n, xp_module):
+            n_unit[valid_n] = v_hat[valid_n] / xp_module.maximum(n_norm[valid_n], self.eps)
+
+        if self.polarity_use_u_gradient:
+            if self.polarity_project_to_tangent and self._any_true(valid_n, xp_module):
+                dgn = xp_module.sum(grad * n_unit, axis=1, keepdims=True)
+                grad = grad - dgn * n_unit
+            grad_dir = self._normalize_vec_rows(grad, xp_module)
+            g = float(self.polarity_grad_gain)
+            p_new = self._normalize_vec_rows((1.0 - g) * p_new + g * grad_dir, xp_module)
+
+        if self.polarity_noise > 0:
+            noise = self._rng.normal(0.0, 1.0, size=(n, 3)).astype(self.dtype, copy=False)
+            p_new = p_new + self.polarity_noise * noise
+
+        if self.polarity_project_to_tangent and self._any_true(valid_n, xp_module):
+            dpn = xp_module.sum(p_new * n_unit, axis=1, keepdims=True)
+            p_new = p_new - dpn * n_unit
+
+        p_norm = xp_module.sqrt(xp_module.sum(p_new * p_new, axis=1, keepdims=True))
+        tiny = p_norm[:, 0] <= self.eps
+        if self._any_true(tiny, xp_module):
+            p_new[tiny] = p_old[tiny]
+            p_norm = xp_module.sqrt(xp_module.sum(p_new * p_new, axis=1, keepdims=True))
+            tiny2 = p_norm[:, 0] <= self.eps
+            if self._any_true(tiny2, xp_module):
+                n_fb = self._to_int(tiny2.sum())
+                p_new[tiny2] = self._random_unit_vectors_backend(n_fb, xp_module, self.dtype)
+                p_norm = xp_module.sqrt(xp_module.sum(p_new * p_new, axis=1, keepdims=True))
+
+        p_new = p_new / xp_module.maximum(p_norm, self.eps)
+        self.p = p_new.astype(self.dtype, copy=False)
+
+        # Alignment coherence diagnostic in [0,1].
+        dots = xp_module.sum(self.p * mean_p_dir, axis=1)
+        coh = xp_module.mean(xp_module.clip(dots, -1.0, 1.0))
+        return self._to_float(coh)
 
     def _initialize_rd_state(self) -> None:
         """Initialize per-cell reaction-diffusion fields u and v."""
@@ -1848,21 +2217,10 @@ class CellGrowth3D:
         return actions
 
     def _prog_from_reaction_diffusion(self, u, v):
-        """Map RD fields to a [0,1] program scalar via sigmoid."""
+        """Map RD state to scalar program: prog = sigmoid(u)."""
         xp_module = self._xp_of(u)
-        if self.rd_prog_from == "u":
-            s = u
-        elif self.rd_prog_from == "v":
-            s = v
-        elif self.rd_prog_from == "u_minus_v":
-            s = u - v
-        elif self.rd_prog_from == "v_minus_u":
-            s = v - u
-        else:  # pragma: no cover
-            raise ValueError(f"Unsupported rd_prog_from: {self.rd_prog_from}")
-
-        z = self.rd_prog_gain * (s - self.rd_prog_center)
-        prog = 1.0 / (1.0 + xp_module.exp(-z))
+        del v  # intentionally unused: scalar program is now defined from u only.
+        prog = 1.0 / (1.0 + xp_module.exp(-u.astype(self.dtype, copy=False)))
         return xp_module.clip(prog, 0.0, 1.0).astype(self.dtype, copy=False)
 
     def _rd_interior_score(self, counts, v_mag):
@@ -1973,9 +2331,10 @@ class CellGrowth3D:
         grid: Optional[GridStruct] = None,
     ):
         """
-        Compute per-cell internal program from ages and local geometry/crowding.
+        Legacy compatibility path: derive program from RD scalar (sigmoid(u)).
 
-        Uses continuous vectors/distances; grid is acceleration only.
+        Grid is still used for exact-neighbor geometry/crowding outputs needed by
+        other parts of the step logic.
         Returns: (prog in [0,1], v_hat, neighbor_counts)
         """
         xp_module = self._xp_of(points)
@@ -1985,70 +2344,23 @@ class CellGrowth3D:
             empty_v = xp_module.zeros((0, 3), dtype=self.dtype)
             empty_counts = xp_module.zeros((0,), dtype=xp_module.int32)
             return empty_prog, empty_v, empty_counts
+        del birth_age
+        del cycle_age
 
         use_grid = grid if grid is not None else self._build_grid(points)
-        v_hat, v_mag = self._local_neighbor_resultants(
+        v_hat, _ = self._local_neighbor_resultants(
             points,
             use_grid,
             float(self.R_sense),
             self.neighbor_weight,
         )
         v_hat = v_hat.astype(self.dtype, copy=False)
-        v_mag = v_mag.astype(self.dtype, copy=False)
         counts = self._neighbor_counts_within(
             points,
             float(self.density_radius),
             grid=use_grid,
         ).astype(xp_module.int32, copy=False)
-
-        a_birth = birth_age.astype(self.dtype, copy=False)
-        a_cycle = cycle_age.astype(self.dtype, copy=False)
-        term_birth = 1.0 - xp_module.exp(
-            -a_birth / max(float(self.program_tau_birth), self.eps)
-        )
-        term_cycle_recent = xp_module.exp(
-            -a_cycle / max(float(self.program_tau_cycle), self.eps)
-        )
-        # High right after division should bias tangential, so we reduce prog there.
-        cycle_effect = 1.0 - term_cycle_recent
-
-        # Use raw resultant magnitude, not ||v_hat|| (v_hat is normalized by design).
-        if xp_module is cp:
-            mag_scale = cp.mean(v_mag) + 2.0 * cp.std(v_mag) + self.eps
-        else:
-            mag_scale = np.percentile(v_mag, 90) + self.eps
-        surface = xp_module.clip(v_mag / mag_scale, 0.0, 1.0)
-
-        crowd_norm = float(max(1, self.crowding_death_threshold))
-        crowd = xp_module.clip(
-            counts.astype(self.dtype, copy=False) / crowd_norm,
-            0.0,
-            1.0,
-        )
-
-        noise = xp_module.zeros((n,), dtype=self.dtype)
-        if self.program_noise > 0:
-            if xp_module is cp:
-                noise = (
-                    self.program_noise
-                    * self._rng.normal(0.0, 1.0, size=n).astype(self.dtype, copy=False)
-                )
-            else:
-                noise = (
-                    self.program_noise
-                    * self._rng_np.normal(0.0, 1.0, size=n).astype(self.dtype, copy=False)
-                )
-
-        prog_raw = (
-            self.program_w_birth * term_birth
-            + self.program_w_cycle * cycle_effect
-            + self.program_surface_gain * surface
-            - self.program_crowd_gain * crowd
-            + noise
-        )
-        z = (prog_raw - self.program_sigmoid_center) * self.program_sigmoid_slope
-        prog = 1.0 / (1.0 + xp_module.exp(-z))
-        prog = xp_module.clip(prog, 0.0, 1.0).astype(self.dtype, copy=False)
+        prog = self._prog_from_reaction_diffusion(self.u, self.v)
         return prog, v_hat, counts
 
     def _division_dirs_programmed(self, points, v_hat, prog):
@@ -2067,11 +2379,21 @@ class CellGrowth3D:
         if self._any_true(good_v, xp_module):
             v_unit[good_v] = v_hat[good_v] / xp_module.maximum(v_norm[good_v], self.eps)
 
-        if self.program_radial_sign == "outward":
+        if self.radial_sign == "inward":
+            d_rad = v_unit.copy()
+        elif self.radial_sign == "random":
+            if xp_module is cp:
+                s = xp_module.where(
+                    self._rng.random_sample(n) < 0.5,
+                    -1.0,
+                    1.0,
+                )
+            else:
+                s = self._rng_np.choice(np.asarray([-1.0, 1.0], dtype=float), size=n)
+            d_rad = v_unit * s[:, None]
+        else:
             # v_hat points toward local mass, so outward is -v_hat.
             d_rad = -v_unit
-        else:
-            d_rad = v_unit.copy()
 
         u = self._random_unit_vectors_backend(n, xp_module, self.dtype)
         d_tan = xp_module.cross(v_unit, u)
@@ -2097,6 +2419,44 @@ class CellGrowth3D:
                 d_tan[idx_good] = alt[good_alt] / xp_module.maximum(altn[good_alt], self.eps)
 
         prog_col = prog.reshape(-1, 1).astype(self.dtype, copy=False)
+        blended = (1.0 - prog_col) * d_tan + prog_col * d_rad
+        bn = xp_module.sqrt(xp_module.sum(blended * blended, axis=1, keepdims=True))
+        need_fallback = bn[:, 0] <= self.eps
+        if self._any_true(need_fallback, xp_module):
+            n_fb = self._to_int(need_fallback.sum())
+            blended[need_fallback] = self._random_unit_vectors_backend(n_fb, xp_module, self.dtype)
+            bn = xp_module.sqrt(xp_module.sum(blended * blended, axis=1, keepdims=True))
+        return blended / xp_module.maximum(bn, self.eps)
+
+    def _division_dirs_from_polarity(self, v_hat, prog):
+        """
+        RD-active polarity-driven directions:
+        - tangential axis from per-cell polarity p
+        - radial axis from -v_hat (outward)
+        - blended by prog in [0,1]
+        """
+        xp_module = self._xp_of(v_hat)
+        n = int(v_hat.shape[0])
+        if n == 0:
+            return xp_module.zeros((0, 3), dtype=self.dtype)
+
+        p = self.p.astype(self.dtype, copy=False)
+        if int(p.shape[0]) != n:
+            p = self._random_unit_vectors_backend(n, xp_module, self.dtype)
+        d_tan = self._normalize_vec_rows(p, xp_module)
+
+        v_norm = xp_module.sqrt(xp_module.sum(v_hat * v_hat, axis=1, keepdims=True))
+        v_unit = xp_module.zeros_like(v_hat)
+        good_v = v_norm[:, 0] > self.eps
+        if self._any_true(good_v, xp_module):
+            v_unit[good_v] = v_hat[good_v] / xp_module.maximum(v_norm[good_v], self.eps)
+        d_rad = -v_unit
+
+        prog_col = xp_module.clip(
+            prog.astype(self.dtype, copy=False).reshape(-1, 1),
+            0.0,
+            1.0,
+        )
         blended = (1.0 - prog_col) * d_tan + prog_col * d_rad
         bn = xp_module.sqrt(xp_module.sum(blended * blended, axis=1, keepdims=True))
         need_fallback = bn[:, 0] <= self.eps
@@ -2188,7 +2548,47 @@ class CellGrowth3D:
             dirs[zero_mask] = fallback
         return dirs
 
-    def _resolve_overlaps(self, pts: cp.ndarray) -> cp.ndarray:
+    def _project_relax_displacements(self, disp, axes=None):
+        """
+        Optionally constrain spring-relaxer displacement directions.
+
+        - none: unchanged
+        - force_dir: project to global forced division axis
+        - polarity: project to per-cell polarity axis
+        """
+        mode = self.relax_projection_mode
+        if mode == "none":
+            return disp
+
+        xp_module = self._xp_of(disp)
+        if mode == "force_dir":
+            if self._force_division_dir_np is None:
+                return disp
+            axis = xp_module.asarray(self._force_division_dir_np, dtype=self.dtype).reshape(1, 3)
+            dotv = xp_module.sum(disp * axis, axis=1, keepdims=True)
+            return dotv * axis
+
+        if mode == "polarity":
+            if axes is None:
+                return disp
+            a = axes.astype(self.dtype, copy=False)
+            if a.shape != disp.shape:
+                return disp
+            an = xp_module.sqrt(xp_module.sum(a * a, axis=1, keepdims=True))
+            valid = an[:, 0] > self.eps
+            a_unit = xp_module.zeros_like(a)
+            if self._any_true(valid, xp_module):
+                a_unit[valid] = a[valid] / xp_module.maximum(an[valid], self.eps)
+            dotv = xp_module.sum(disp * a_unit, axis=1, keepdims=True)
+            projected = dotv * a_unit
+            # Keep original displacement where axis is undefined.
+            if self._any_true(~valid, xp_module):
+                projected[~valid] = disp[~valid]
+            return projected
+
+        return disp
+
+    def _resolve_overlaps(self, pts: cp.ndarray, relax_axes=None) -> cp.ndarray:
         """
         Iteratively relax local pairwise springs with exact distances.
 
@@ -2242,6 +2642,7 @@ class CellGrowth3D:
                     )
                     if not bool(cp.any(hits > 0).item()):
                         break
+                    disp = self._project_relax_displacements(disp, axes=relax_axes)
                     pos += disp
                 return pos.astype(self.dtype, copy=False)
             except Exception as exc:
@@ -2315,6 +2716,7 @@ class CellGrowth3D:
 
             if not moved:
                 break
+            disp = self._project_relax_displacements(disp, axes=relax_axes)
             pos += disp
 
         return pos.astype(self.dtype, copy=False)
@@ -2374,6 +2776,8 @@ class CellGrowth3D:
         counts_all = None
         program_grid = None
         interior_score = None
+        polarity_coherence_this_step = 0.0
+        self.last_polarity_coherence = 0.0
         rd_active = bool(
             self.enable_reaction_diffusion
             and self.points.shape[0] > 0
@@ -2382,8 +2786,8 @@ class CellGrowth3D:
         if rd_active:
             program_grid = self._build_grid(self.points)
             self._rd_step(self.points, grid=program_grid)
-            if self.rd_couple_to_prog:
-                prog_all = self._prog_from_reaction_diffusion(self.u, self.v)
+            # Program scalar is now RD-derived directly (sigmoid(u)).
+            prog_all = self._prog_from_reaction_diffusion(self.u, self.v)
             counts_all = self._neighbor_counts_within(
                 self.points,
                 float(self.density_radius),
@@ -2397,8 +2801,17 @@ class CellGrowth3D:
             )
             if counts_all is not None:
                 interior_score = self._rd_interior_score(counts_all, v_mag_all)
-        elif self.enable_cell_program and self.points.shape[0] > 0:
+            if self.enable_polarity and v_hat_all is not None:
+                polarity_coherence_this_step = self._update_polarity(
+                    self.points,
+                    v_hat_all,
+                    grid=program_grid,
+                )
+                self.last_polarity_coherence = float(polarity_coherence_this_step)
+        elif self.points.shape[0] > 0:
             program_grid = self._build_grid(self.points)
+            # Keep legacy branch but derive prog from RD state variables only
+            # (no separate age/cycle program dynamics).
             prog_all, v_hat_all, counts_all = self._update_cell_program(
                 self.points,
                 self.birth_age,
@@ -2475,12 +2888,9 @@ class CellGrowth3D:
         if rd_active and bool(cp.any(divide_mask)):
             eligible_divide_mask = divide_mask.copy()
             u_signal = cp.clip(self.u.astype(self.dtype, copy=False), 0.0, 1.0)
-            # High u -> higher divide probability. Apply both RD-specific and
-            # generic program bounds so global min/max knobs still cap behavior.
-            p_min = max(self.rd_divide_min_p, self.program_divide_min_p)
-            p_max = min(self.rd_divide_max_p, self.program_divide_max_p)
-            if p_max < p_min:
-                p_max = p_min
+            # High u -> higher divide probability (RD-only controls).
+            p_min = float(self.rd_divide_min_p)
+            p_max = float(self.rd_divide_max_p)
             p_divide = cp.clip(
                 self.rd_divide_base_p + self.rd_divide_boost * (u_signal - self.rd_divide_center),
                 p_min,
@@ -2500,17 +2910,12 @@ class CellGrowth3D:
             draw_divide = rand_u < p_divide
             divide_mask = eligible_divide_mask & draw_divide
             stay_mask = stay_mask | (eligible_divide_mask & (~draw_divide))
-        elif (
-            self.enable_cell_program
-            and self.enable_program_division_modulation
-            and prog_all is not None
-            and bool(cp.any(divide_mask))
-        ):
+        elif prog_all is not None and bool(cp.any(divide_mask)):
             eligible_divide_mask = divide_mask.copy()
             p_divide = cp.clip(
-                1.0 + self.program_divide_boost * (prog_all - 0.5),
-                self.program_divide_min_p,
-                self.program_divide_max_p,
+                1.0 + self.rd_divide_boost * (prog_all - 0.5),
+                self.rd_divide_min_p,
+                self.rd_divide_max_p,
             )
             rand_u = self._rng.random_sample(self.points.shape[0]).astype(
                 self.dtype,
@@ -2531,6 +2936,7 @@ class CellGrowth3D:
         next_prog_blocks = []
         next_u_blocks = []
         next_v_blocks = []
+        next_p_blocks = []
         source_blocks = []
         source_id_blocks = []
         target_blocks = []
@@ -2550,7 +2956,8 @@ class CellGrowth3D:
             stay_cycle_age = self.cycle_age[stay_mask] + cp.int32(1)
             stay_u = self.u[stay_mask]
             stay_v = self.v[stay_mask]
-            if (self.enable_cell_program or self.enable_reaction_diffusion) and prog_all is not None:
+            stay_p = self.p[stay_mask]
+            if prog_all is not None:
                 stay_prog = prog_all[stay_mask]
             else:
                 stay_prog = self.cell_prog[stay_mask]
@@ -2561,6 +2968,7 @@ class CellGrowth3D:
             next_prog_blocks.append(stay_prog.astype(self.dtype, copy=False))
             next_u_blocks.append(stay_u.astype(self.dtype, copy=False))
             next_v_blocks.append(stay_v.astype(self.dtype, copy=False))
+            next_p_blocks.append(stay_p.astype(self.dtype, copy=False))
             if return_transition:
                 source_blocks.append(stay_points)
                 source_id_blocks.append(stay_ids)
@@ -2574,7 +2982,16 @@ class CellGrowth3D:
         mark("stay")
 
         if bool(cp.any(divide_mask)):
-            if (self.enable_cell_program or self.enable_reaction_diffusion) and prog_all is not None and v_hat_all is not None:
+            if rd_active and self.enable_polarity and v_hat_all is not None:
+                if prog_all is not None:
+                    prog_dirs = prog_all
+                else:
+                    prog_dirs = cp.clip(self.u.astype(self.dtype, copy=False), 0.0, 1.0)
+                dirs_all = self._division_dirs_from_polarity(
+                    v_hat_all,
+                    prog_dirs,
+                ).astype(self.dtype, copy=False)
+            elif prog_all is not None and v_hat_all is not None:
                 dirs_all = self._division_dirs_programmed(
                     self.points,
                     v_hat_all,
@@ -2592,11 +3009,17 @@ class CellGrowth3D:
                 )
                 dirs_all = self._division_dirs_from_vhat(v_hat).astype(self.dtype, copy=False)
 
+            if self._force_division_dir_np is not None:
+                xp_module = self._xp_of(self.points)
+                d_fix = xp_module.asarray(self._force_division_dir_np, dtype=self.dtype)
+                dirs_all = xp_module.repeat(d_fix[None, :], int(self.points.shape[0]), axis=0)
+
             dirs = dirs_all[divide_mask]
             parents = self.points[divide_mask]
             parent_ids = self.cell_ids[divide_mask]
             parent_u = self.u[divide_mask]
             parent_v = self.v[divide_mask]
+            parent_p = self.p[divide_mask]
             # Never place sister cells closer than one radius.
             effective_split_distance = max(self.split_distance, 1.0 * self.radius)
             offset = (effective_split_distance * 0.5) * dirs
@@ -2646,11 +3069,26 @@ class CellGrowth3D:
                 daughters_u_b = cp.clip(daughters_u_b, 0.0, 1.0)
                 daughters_v_a = cp.clip(daughters_v_a, 0.0, 1.0)
                 daughters_v_b = cp.clip(daughters_v_b, 0.0, 1.0)
+
+            daughters_p_a = parent_p.astype(self.dtype, copy=True)
+            daughters_p_b = parent_p.astype(self.dtype, copy=True)
+            pol_noise = (
+                0.1
+                * self._rng.normal(0.0, 1.0, size=(n_div, 3)).astype(self.dtype, copy=False)
+            )
+            daughters_p_a += pol_noise
+            daughters_p_b += (
+                0.1
+                * self._rng.normal(0.0, 1.0, size=(n_div, 3)).astype(self.dtype, copy=False)
+            )
+            daughters_p_a = self._normalize_vec_rows(daughters_p_a, cp).astype(self.dtype, copy=False)
+            daughters_p_b = self._normalize_vec_rows(daughters_p_b, cp).astype(self.dtype, copy=False)
             next_birth_age_blocks.extend([daughters_birth_age, daughters_birth_age.copy()])
             next_cycle_age_blocks.extend([daughters_cycle_age, daughters_cycle_age.copy()])
             next_prog_blocks.extend([daughters_prog, daughters_prog.copy()])
             next_u_blocks.extend([daughters_u_a, daughters_u_b])
             next_v_blocks.extend([daughters_v_a, daughters_v_b])
+            next_p_blocks.extend([daughters_p_a, daughters_p_b])
             if return_transition:
                 source_blocks.extend([parents, parents])
                 source_id_blocks.extend([parent_ids, parent_ids])
@@ -2697,12 +3135,16 @@ class CellGrowth3D:
             next_prog = cp.concatenate(next_prog_blocks, axis=0)
             next_u = cp.concatenate(next_u_blocks, axis=0)
             next_v = cp.concatenate(next_v_blocks, axis=0)
+            next_p = cp.concatenate(next_p_blocks, axis=0)
             mark("assemble")
             if self.enforce_non_overlap and next_points.shape[0] > 1:
                 if timing_enabled:
                     self._sync_for_timing()
                     t_overlap = time.perf_counter()
-                next_points = self._resolve_overlaps(next_points)
+                relax_axes = None
+                if self.relax_projection_mode == "polarity":
+                    relax_axes = next_p
+                next_points = self._resolve_overlaps(next_points, relax_axes=relax_axes)
                 if timing_enabled:
                     self._sync_for_timing()
                     now = time.perf_counter()
@@ -2716,6 +3158,7 @@ class CellGrowth3D:
             next_prog = cp.empty((0,), dtype=self.dtype)
             next_u = cp.empty((0,), dtype=self.dtype)
             next_v = cp.empty((0,), dtype=self.dtype)
+            next_p = cp.empty((0, 3), dtype=self.dtype)
             mark("assemble")
 
         if self.max_cells is not None and next_points.shape[0] > self.max_cells:
@@ -2768,49 +3211,47 @@ class CellGrowth3D:
         self.cell_prog = next_prog
         self.u = next_u
         self.v = next_v
+        self.p = next_p
         self.step_index += 1
         self.count_history.append(int(self.points.shape[0]))
-        if self.enable_cell_program or self.enable_reaction_diffusion:
-            n_after = int(self.points.shape[0])
-            if n_after > 0:
-                prog = self.cell_prog.astype(self.dtype, copy=False)
-                birth = self.birth_age.astype(self.dtype, copy=False)
-                cycle = self.cycle_age.astype(self.dtype, copy=False)
-                self.last_program_summary = {
-                    "step": float(self.step_index),
-                    "cells": float(n_after),
-                    "prog_mean": self._to_float(cp.mean(prog)),
-                    "prog_min": self._to_float(cp.min(prog)),
-                    "prog_max": self._to_float(cp.max(prog)),
-                    "birth_mean": self._to_float(cp.mean(birth)),
-                    "cycle_mean": self._to_float(cp.mean(cycle)),
-                    "divide": float(n_divide_final),
-                    "divide_eligible": float(n_divide_eligible),
-                    "stay": float(n_stay_final),
-                    "die": float(n_die_final),
-                    "apoptosis": float(n_apoptosis_this_step),
-                    "apoptosis_rd": float(n_apoptosis_rd_this_step),
-                    "interior_mean": float(interior_mean_this_step),
-                }
-            else:
-                self.last_program_summary = {
-                    "step": float(self.step_index),
-                    "cells": 0.0,
-                    "prog_mean": 0.0,
-                    "prog_min": 0.0,
-                    "prog_max": 0.0,
-                    "birth_mean": 0.0,
-                    "cycle_mean": 0.0,
-                    "divide": float(n_divide_final),
-                    "divide_eligible": float(n_divide_eligible),
-                    "stay": float(n_stay_final),
-                    "die": float(n_die_final),
-                    "apoptosis": float(n_apoptosis_this_step),
-                    "apoptosis_rd": float(n_apoptosis_rd_this_step),
-                    "interior_mean": float(interior_mean_this_step),
-                }
+        n_after = int(self.points.shape[0])
+        if n_after > 0:
+            prog = self.cell_prog.astype(self.dtype, copy=False)
+            birth = self.birth_age.astype(self.dtype, copy=False)
+            cycle = self.cycle_age.astype(self.dtype, copy=False)
+            self.last_program_summary = {
+                "step": float(self.step_index),
+                "cells": float(n_after),
+                "prog_mean": self._to_float(cp.mean(prog)),
+                "prog_min": self._to_float(cp.min(prog)),
+                "prog_max": self._to_float(cp.max(prog)),
+                "birth_mean": self._to_float(cp.mean(birth)),
+                "cycle_mean": self._to_float(cp.mean(cycle)),
+                "divide": float(n_divide_final),
+                "divide_eligible": float(n_divide_eligible),
+                "stay": float(n_stay_final),
+                "die": float(n_die_final),
+                "apoptosis": float(n_apoptosis_this_step),
+                "apoptosis_rd": float(n_apoptosis_rd_this_step),
+                "interior_mean": float(interior_mean_this_step),
+            }
         else:
-            self.last_program_summary = None
+            self.last_program_summary = {
+                "step": float(self.step_index),
+                "cells": 0.0,
+                "prog_mean": 0.0,
+                "prog_min": 0.0,
+                "prog_max": 0.0,
+                "birth_mean": 0.0,
+                "cycle_mean": 0.0,
+                "divide": float(n_divide_final),
+                "divide_eligible": float(n_divide_eligible),
+                "stay": float(n_stay_final),
+                "die": float(n_die_final),
+                "apoptosis": float(n_apoptosis_this_step),
+                "apoptosis_rd": float(n_apoptosis_rd_this_step),
+                "interior_mean": float(interior_mean_this_step),
+            }
         if (
             self.enable_reaction_diffusion
             and self.step_index > int(self.rd_start_step)
@@ -2832,6 +3273,7 @@ class CellGrowth3D:
                         "prog_min": self._to_float(cp.min(prog)),
                         "prog_mean": self._to_float(cp.mean(prog)),
                         "prog_max": self._to_float(cp.max(prog)),
+                        "polarity_coherence": float(self.last_polarity_coherence),
                     }
                 else:
                     self.last_rd_summary = {
@@ -2845,6 +3287,7 @@ class CellGrowth3D:
                         "prog_min": 0.0,
                         "prog_mean": 0.0,
                         "prog_max": 0.0,
+                        "polarity_coherence": float(self.last_polarity_coherence),
                     }
             else:
                 self.last_rd_summary = None
@@ -2981,7 +3424,7 @@ class CellGrowth3D:
             raise ValueError("large_cells_threshold must be >= 1")
         if max_render_cells is not None and max_render_cells < 1:
             raise ValueError("max_render_cells must be >= 1 when provided")
-        valid_color_modes = {"order", "radius", "none", "u", "v", "prog", "age"}
+        valid_color_modes = {"order", "radius", "none", "u", "v", "prog", "age", "pz"}
         if color_by not in valid_color_modes:
             raise ValueError(f"color_by must be one of {sorted(valid_color_modes)}")
         valid_death_modes = {"none", "fade", "shrink", "fade_shrink"}
@@ -3003,7 +3446,7 @@ class CellGrowth3D:
                 return cp.asnumpy(arr)
             return np.asarray(arr)
 
-        scalar_mode = color_by in {"u", "v", "prog", "age"}
+        scalar_mode = color_by in {"u", "v", "prog", "age", "pz"}
 
         def current_movie_scalar_state() -> np.ndarray:
             if color_by == "u":
@@ -3014,6 +3457,8 @@ class CellGrowth3D:
                 return to_numpy(self.cell_prog.copy()).astype(float, copy=False)
             if color_by == "age":
                 return to_numpy(self.birth_age.copy()).astype(float, copy=False)
+            if color_by == "pz":
+                return to_numpy(self.p[:, 2].copy()).astype(float, copy=False)
             return np.empty((0,), dtype=float)
 
         # Pass 1: simulate and capture transitions.
@@ -3333,7 +3778,7 @@ class CellGrowth3D:
                         edge_color=edge_color,
                         line_width=edge_width,
                     )
-                elif color_by in {"u", "v", "prog", "age"}:
+                elif color_by in {"u", "v", "prog", "age", "pz"}:
                     if scalar is None:
                         raise ValueError(f"color_by='{color_by}' requires scalar frame values.")
                     spheres["val"] = np.repeat(scalar, base_sphere.n_points)
@@ -3451,6 +3896,7 @@ class CellGrowth3D:
         cell_prog = cp.asnumpy(self.cell_prog) if _GPU_ENABLED else np.asarray(self.cell_prog)
         u = cp.asnumpy(self.u) if _GPU_ENABLED else np.asarray(self.u)
         v = cp.asnumpy(self.v) if _GPU_ENABLED else np.asarray(self.v)
+        p = cp.asnumpy(self.p) if _GPU_ENABLED else np.asarray(self.p)
         np.savez_compressed(
             out,
             points=pts,
@@ -3460,6 +3906,7 @@ class CellGrowth3D:
             cell_prog=cell_prog.astype(np.float32, copy=False),
             u=u.astype(np.float32, copy=False),
             v=v.astype(np.float32, copy=False),
+            p=p.astype(np.float32, copy=False),
             count_history=np.asarray(self.count_history, dtype=np.int32),
             step_index=np.int32(self.step_index),
             next_cell_id=np.int64(self._next_cell_id),
@@ -3473,20 +3920,12 @@ class CellGrowth3D:
             division_direction_mode=np.asarray(self.division_direction_mode),
             neighbor_weight=np.asarray(self.neighbor_weight),
             radial_sign=np.asarray(self.radial_sign),
-            enable_cell_program=np.int8(1 if self.enable_cell_program else 0),
-            program_tau_birth=np.float32(self.program_tau_birth),
-            program_tau_cycle=np.float32(self.program_tau_cycle),
-            program_w_birth=np.float32(self.program_w_birth),
-            program_w_cycle=np.float32(self.program_w_cycle),
             program_surface_gain=np.float32(self.program_surface_gain),
             program_crowd_gain=np.float32(self.program_crowd_gain),
             program_noise=np.float32(self.program_noise),
             program_sigmoid_center=np.float32(self.program_sigmoid_center),
             program_sigmoid_slope=np.float32(self.program_sigmoid_slope),
             program_radial_sign=np.asarray(self.program_radial_sign),
-            enable_program_division_modulation=np.int8(
-                1 if self.enable_program_division_modulation else 0
-            ),
             program_divide_boost=np.float32(self.program_divide_boost),
             program_divide_min_p=np.float32(self.program_divide_min_p),
             program_divide_max_p=np.float32(self.program_divide_max_p),
@@ -3530,6 +3969,19 @@ class CellGrowth3D:
             rd_interior_apoptosis_shield=np.float32(self.rd_interior_apoptosis_shield),
             rd_interior_divide_damp=np.float32(self.rd_interior_divide_damp),
             rd_interior_crowd_weight=np.float32(self.rd_interior_crowd_weight),
+            enable_polarity=np.int8(1 if self.enable_polarity else 0),
+            polarity_noise=np.float32(self.polarity_noise),
+            polarity_align_alpha0=np.float32(self.polarity_align_alpha0),
+            polarity_align_alpha_u=np.float32(self.polarity_align_alpha_u),
+            polarity_radius=np.float32(self.polarity_radius if self.polarity_radius is not None else -1.0),
+            polarity_project_to_tangent=np.int8(1 if self.polarity_project_to_tangent else 0),
+            polarity_use_u_gradient=np.int8(1 if self.polarity_use_u_gradient else 0),
+            polarity_grad_gain=np.float32(self.polarity_grad_gain),
+            polarity_mix_prev=np.float32(self.polarity_mix_prev),
+            force_division_direction=np.asarray(
+                self.force_division_direction if self.force_division_direction is not None else ""
+            ),
+            relax_projection_mode=np.asarray(self.relax_projection_mode),
             dtype=np.asarray(self.dtype),
         )
         print(f"Saved data: {out}")
@@ -3552,6 +4004,9 @@ class CellGrowth3D:
         elif color_by == "age":
             scalar_values = self._as_numpy(self.birth_age).astype(float, copy=False)
             opts["color_by"] = "scalar"
+        elif color_by == "pz":
+            scalar_values = self._as_numpy(self.p[:, 2]).astype(float, copy=False)
+            opts["color_by"] = "scalar"
         if scalar_values is not None:
             opts["scalar_values"] = scalar_values
         show_cells_pyvista(self.points_numpy(), cell_radius=self.radius, **opts)
@@ -3572,6 +4027,9 @@ class CellGrowth3D:
             opts["color_by"] = "scalar"
         elif color_by == "age":
             scalar_values = self._as_numpy(self.birth_age).astype(float, copy=False)
+            opts["color_by"] = "scalar"
+        elif color_by == "pz":
+            scalar_values = self._as_numpy(self.p[:, 2]).astype(float, copy=False)
             opts["color_by"] = "scalar"
         if scalar_values is not None:
             opts["scalar_values"] = scalar_values
@@ -3625,36 +4083,6 @@ def _build_cli() -> argparse.ArgumentParser:
         help=f"Chronological age threshold for apoptosis (default: {DEFAULT_APOPTOSIS_AGE})",
     )
     parser.add_argument(
-        "--cell-program",
-        action=argparse.BooleanOptionalAction,
-        default=DEFAULT_ENABLE_CELL_PROGRAM,
-        help="Enable per-cell internal program (age + geometry + crowding)",
-    )
-    parser.add_argument(
-        "--program-tau-birth",
-        type=float,
-        default=DEFAULT_PROGRAM_TAU_BIRTH,
-        help="Chronological-age timescale for program maturation",
-    )
-    parser.add_argument(
-        "--program-tau-cycle",
-        type=float,
-        default=DEFAULT_PROGRAM_TAU_CYCLE,
-        help="Cycle-age timescale for post-division program effect",
-    )
-    parser.add_argument(
-        "--program-w-birth",
-        type=float,
-        default=DEFAULT_PROGRAM_W_BIRTH,
-        help="Weight of chronological age in per-cell program",
-    )
-    parser.add_argument(
-        "--program-w-cycle",
-        type=float,
-        default=DEFAULT_PROGRAM_W_CYCLE,
-        help="Weight of cycle age in per-cell program",
-    )
-    parser.add_argument(
         "--program-surface-gain",
         type=float,
         default=DEFAULT_PROGRAM_SURFACE_GAIN,
@@ -3667,46 +4095,16 @@ def _build_cli() -> argparse.ArgumentParser:
         help="Program suppression gain from local crowding",
     )
     parser.add_argument(
-        "--program-noise",
-        type=float,
-        default=DEFAULT_PROGRAM_NOISE,
-        help="Program noise amplitude used for symmetry breaking",
-    )
-    parser.add_argument(
-        "--program-divide-boost",
-        type=float,
-        default=DEFAULT_PROGRAM_DIVIDE_BOOST,
-        help="Strength of program-dependent division probability modulation",
-    )
-    parser.add_argument(
-        "--program-divide-min-p",
-        type=float,
-        default=DEFAULT_PROGRAM_DIVIDE_MIN_P,
-        help="Global minimum per-cell divide probability cap (applies in all modes)",
-    )
-    parser.add_argument(
-        "--program-divide-max-p",
-        type=float,
-        default=DEFAULT_PROGRAM_DIVIDE_MAX_P,
-        help="Global maximum per-cell divide probability cap (applies in all modes)",
-    )
-    parser.add_argument(
-        "--program-divide-modulation",
-        action=argparse.BooleanOptionalAction,
-        default=DEFAULT_ENABLE_PROGRAM_DIVISION_MODULATION,
-        help="Enable program-based stochastic modulation of divide-eligible cells",
-    )
-    parser.add_argument(
-        "--program-radial-sign",
-        choices=["outward", "inward"],
-        default=DEFAULT_PROGRAM_RADIAL_SIGN,
-        help="Radial sign for programmed directions (outward = -v_hat)",
+        "--radial-sign",
+        choices=["outward", "inward", "random"],
+        default="outward",
+        help="Radial division sign when using radial/programmed directions",
     )
     parser.add_argument(
         "--program-summary",
         action=argparse.BooleanOptionalAction,
-        default=DEFAULT_PROGRAM_SUMMARY,
-        help="Print per-step summary of program values/ages/actions when cell program is enabled",
+        default=True,
+        help="Print per-step program/action summary",
     )
     parser.add_argument(
         "--reaction-diffusion",
@@ -3767,14 +4165,14 @@ def _build_cli() -> argparse.ArgumentParser:
         "--rd-prog-from",
         choices=["u", "v", "u_minus_v", "v_minus_u"],
         default=DEFAULT_RD_PROG_FROM,
-        help="Signal used to map RD fields to program scalar",
+        help="Legacy (ignored): program scalar now uses sigmoid(u)",
     )
-    parser.add_argument("--rd-prog-gain", type=float, default=DEFAULT_RD_PROG_GAIN, help="Sigmoid gain for RD->prog")
+    parser.add_argument("--rd-prog-gain", type=float, default=DEFAULT_RD_PROG_GAIN, help="Legacy (ignored): program scalar now uses sigmoid(u)")
     parser.add_argument(
         "--rd-prog-center",
         type=float,
         default=DEFAULT_RD_PROG_CENTER,
-        help="Sigmoid center for RD->prog conversion",
+        help="Legacy (ignored): program scalar now uses sigmoid(u)",
     )
     parser.add_argument(
         "--rd-divide-boost",
@@ -3866,6 +4264,72 @@ def _build_cli() -> argparse.ArgumentParser:
         default=DEFAULT_RD_COUPLE_TO_PROG,
         help="Use RD fields to drive tangential/radial division-direction blend",
     )
+    parser.add_argument(
+        "--polarity",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_ENABLE_POLARITY,
+        help="Enable self-organized planar polarity alignment for RD-active division orientation",
+    )
+    parser.add_argument(
+        "--polarity-noise",
+        type=float,
+        default=DEFAULT_POLARITY_NOISE,
+        help="Per-step polarity noise amplitude",
+    )
+    parser.add_argument(
+        "--polarity-align-alpha0",
+        type=float,
+        default=DEFAULT_POLARITY_ALIGN_ALPHA0,
+        help="Baseline neighbor alignment strength for polarity",
+    )
+    parser.add_argument(
+        "--polarity-align-alpha-u",
+        type=float,
+        default=DEFAULT_POLARITY_ALIGN_ALPHA_U,
+        help="Additional polarity alignment strength proportional to local u",
+    )
+    parser.add_argument(
+        "--polarity-radius",
+        type=float,
+        default=DEFAULT_POLARITY_RADIUS,
+        help="Neighbor radius for polarity alignment (default: R_signal)",
+    )
+    parser.add_argument(
+        "--polarity-project-to-tangent",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_POLARITY_PROJECT_TO_TANGENT,
+        help="Project polarity and optional u-gradient to local tangent plane from v_hat",
+    )
+    parser.add_argument(
+        "--polarity-use-u-gradient",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_POLARITY_USE_U_GRADIENT,
+        help="Blend local u-gradient into polarity update",
+    )
+    parser.add_argument(
+        "--polarity-grad-gain",
+        type=float,
+        default=DEFAULT_POLARITY_GRAD_GAIN,
+        help="Blend gain for u-gradient contribution to polarity direction",
+    )
+    parser.add_argument(
+        "--polarity-mix-prev",
+        type=float,
+        default=DEFAULT_POLARITY_MIX_PREV,
+        help="Polarity inertia (0=no memory, 1=fully persistent)",
+    )
+    parser.add_argument(
+        "--force-division-direction",
+        type=str,
+        default=DEFAULT_FORCE_DIVISION_DIRECTION,
+        help="Override all division directions with a fixed unit vector, format: x,y,z",
+    )
+    parser.add_argument(
+        "--relax-projection-mode",
+        choices=["none", "force_dir", "polarity"],
+        default=DEFAULT_RELAX_PROJECTION_MODE,
+        help="Project spring-relaxer displacements: none, force_dir, or polarity",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
         "--timing",
@@ -3901,7 +4365,7 @@ def _build_cli() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--color-by",
-        choices=["order", "radius", "solid", "u", "v", "prog", "age"],
+        choices=["order", "radius", "solid", "u", "v", "prog", "age", "pz"],
         default=DEFAULT_COLOR_BY,
         help="Sphere coloring mode in PyVista view",
     )
@@ -4054,19 +4518,9 @@ def main() -> None:
         crowding_death_threshold=args.crowding_death_threshold,
         enable_step_timing=args.timing,
         sync_timing_gpu=args.timing_sync_gpu,
-        enable_cell_program=args.cell_program,
-        program_tau_birth=args.program_tau_birth,
-        program_tau_cycle=args.program_tau_cycle,
-        program_w_birth=args.program_w_birth,
-        program_w_cycle=args.program_w_cycle,
         program_surface_gain=args.program_surface_gain,
         program_crowd_gain=args.program_crowd_gain,
-        program_noise=args.program_noise,
-        program_divide_boost=args.program_divide_boost,
-        program_divide_min_p=args.program_divide_min_p,
-        program_divide_max_p=args.program_divide_max_p,
-        enable_program_division_modulation=args.program_divide_modulation,
-        program_radial_sign=args.program_radial_sign,
+        radial_sign=args.radial_sign,
         print_program_summary=args.program_summary,
         enable_apoptosis=args.apoptosis,
         apoptosis_age=args.apoptosis_age,
@@ -4103,6 +4557,17 @@ def main() -> None:
         rd_interior_divide_damp=args.rd_interior_divide_damp,
         rd_interior_crowd_weight=args.rd_interior_crowd_weight,
         rd_couple_to_prog=args.rd_couple_to_prog,
+        enable_polarity=args.polarity,
+        polarity_noise=args.polarity_noise,
+        polarity_align_alpha0=args.polarity_align_alpha0,
+        polarity_align_alpha_u=args.polarity_align_alpha_u,
+        polarity_radius=args.polarity_radius,
+        polarity_project_to_tangent=args.polarity_project_to_tangent,
+        polarity_use_u_gradient=args.polarity_use_u_gradient,
+        polarity_grad_gain=args.polarity_grad_gain,
+        polarity_mix_prev=args.polarity_mix_prev,
+        force_division_direction=args.force_division_direction,
+        relax_projection_mode=args.relax_projection_mode,
     )
     print(backend_summary())
     if _GPU_ENABLED:
@@ -4131,10 +4596,23 @@ def main() -> None:
             f"(shield={sim.rd_interior_apoptosis_shield:g}, divide_damp={sim.rd_interior_divide_damp:g}, "
             f"crowd_weight={sim.rd_interior_crowd_weight:g})"
         )
+        print(
+            "Polarity: "
+            f"enabled={sim.enable_polarity}, noise={sim.polarity_noise:g}, "
+            f"alpha0={sim.polarity_align_alpha0:g}, alpha_u={sim.polarity_align_alpha_u:g}, "
+            f"radius={sim.polarity_radius if sim.polarity_radius is not None else sim.R_signal:g}, "
+            f"proj_tangent={sim.polarity_project_to_tangent}, "
+            f"use_u_grad={sim.polarity_use_u_gradient}, grad_gain={sim.polarity_grad_gain:g}, "
+            f"mix_prev={sim.polarity_mix_prev:g}"
+        )
+    if sim._force_division_dir_np is not None:
+        fdx, fdy, fdz = sim._force_division_dir_np.tolist()
+        print(f"Division direction override: [{fdx:.4f}, {fdy:.4f}, {fdz:.4f}]")
+    print(f"Relaxer projection mode: {sim.relax_projection_mode}")
     print("Note: PyVista rendering/movie encoding is separate from simulation kernels.")
     color_by = "none" if args.color_by == "solid" else args.color_by
     movie_color_by = color_by
-    if movie_color_by not in {"order", "radius", "none", "u", "v", "prog", "age"}:
+    if movie_color_by not in {"order", "radius", "none", "u", "v", "prog", "age", "pz"}:
         movie_color_by = "order"
         if args.save_movie:
             print("Unknown movie color-by mode; using order for movie frames.")
