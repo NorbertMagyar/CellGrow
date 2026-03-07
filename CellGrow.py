@@ -36,32 +36,32 @@ ActionRule = Callable[[cp.ndarray, int], cp.ndarray]
 
 # Main simulation controls
 #==========================================================================
-DEFAULT_STEPS = 100  # Number of simulation timesteps.
+DEFAULT_STEPS = 200  # Number of simulation timesteps.
 DEFAULT_CROWDING_STAY_THRESHOLD = 12  # Neighbor count above which cells stop dividing.
-DEFAULT_CROWDING_DEATH_THRESHOLD = 20  # Neighbor count at/above which cells die.
+DEFAULT_CROWDING_DEATH_THRESHOLD = 16  # Neighbor count at/above which cells die.
 DEFAULT_NEIGHBORHOOD_RADIUS_FACTOR = 2.1  # Multiplier for density_radius relative to cell radius.
-DEFAULT_OVERLAP_RELAX_ITERS = 10  # Iterations of local spring relaxer per simulation step.
+DEFAULT_OVERLAP_RELAX_ITERS = 25  # Iterations of local spring relaxer per simulation step.
 DEFAULT_DIVISION_DIRECTION_MODE = "tangential"  # Division direction mode; options: least_resistance, tangential, radial.
 
 # I/O knobs
 #============================================================================
 DEFAULT_SHOW = True  # Show interactive PyVista window at end of run.
-DEFAULT_COLOR_BY = "pz"  # Static color mode; options: order, radius, solid, u, v, prog, age, pz.
+DEFAULT_COLOR_BY = "u"  # Static color mode; options: order, radius, solid, u, v, prog, age, pz.
 DEFAULT_OUTPUT_STEM = (  # Base filename stem used by default output paths.
     f"cell_growth_"
     f"cr_{DEFAULT_CROWDING_STAY_THRESHOLD}_"
     f"de_{DEFAULT_CROWDING_DEATH_THRESHOLD}_"
     f"dir_{DEFAULT_DIVISION_DIRECTION_MODE}"
 )
-DEFAULT_SAVE_DATA = False  # Save final state to NPZ by default.
+DEFAULT_SAVE_DATA = True  # Save final state to NPZ by default.
 DEFAULT_DATA_PATH = f"{DEFAULT_OUTPUT_STEM}.npz"  # Default NPZ output path.
 DEFAULT_SAVE_SNAPSHOT = False # Save final snapshot image by default.
 DEFAULT_SNAPSHOT_PATH = f"{DEFAULT_OUTPUT_STEM}.png"  # Default snapshot output path.
 DEFAULT_SAVE_MOVIE = False # Render and save movie by default.
 DEFAULT_MOVIE_PATH = f"{DEFAULT_OUTPUT_STEM}.mp4"  # Default movie output path.
 DEFAULT_MOVIE_FPS = 24  # Default movie FPS when not auto-scaled.
-DEFAULT_MOVIE_DURATION_SECONDS: Optional[float] = 10  # Target duration (seconds) for auto FPS scaling; set None to disable.
-DEFAULT_INTERP_FRAMES = 5  # Interpolated frames between simulation steps in movie mode.
+DEFAULT_MOVIE_DURATION_SECONDS: Optional[float] = 20  # Target duration (seconds) for auto FPS scaling; set None to disable.
+DEFAULT_INTERP_FRAMES = 3  # Interpolated frames between simulation steps in movie mode.
 DEFAULT_MOVIE_WIDTH = 1024  # Movie frame width (px).
 DEFAULT_MOVIE_HEIGHT = 860  # Movie frame height (px).
 DEFAULT_MOVIE_SPHERE_THETA = 16  # Sphere theta tessellation in movie rendering.
@@ -74,76 +74,76 @@ DEFAULT_MOVIE_DEATH_ANIMATION = "shrink"  # Death animation; options: none, fade
 DEFAULT_TIMING = False  # Print per-step timing breakdown.
 DEFAULT_TIMING_SYNC_GPU = True  # Synchronize GPU before timing marks for accurate timings.
 DEFAULT_MOVIE_ADAPTIVE_LARGE = True  # Enable adaptive movie settings for large colonies.
-DEFAULT_MOVIE_LARGE_CELLS_THRESHOLD = 8000  # Cell-count threshold for adaptive movie behavior.
-DEFAULT_MOVIE_LARGE_INTERP_FRAMES = 2  # Interp frame count used after adaptive threshold.
+DEFAULT_MOVIE_LARGE_CELLS_THRESHOLD = 100000  # Cell-count threshold for adaptive movie behavior.
+DEFAULT_MOVIE_LARGE_INTERP_FRAMES = 1  # Interp frame count used after adaptive threshold.
 DEFAULT_MOVIE_MAX_RENDER_CELLS = 50000  # Max cells rendered per movie frame (sampling above this).
 DEFAULT_VIEW_MAX_RENDER_CELLS = 50000  # Max cells rendered in static final view.
 
 # Reaction-Diffusion calculation across cells
 #==============================================================================
-DEFAULT_ENABLE_REACTION_DIFFUSION = False  # Enable reaction-diffusion subsystem.
-DEFAULT_RD_START_STEP = 25  # Step index when RD starts affecting dynamics.
+DEFAULT_ENABLE_REACTION_DIFFUSION = True # Enable reaction-diffusion subsystem.
+DEFAULT_RD_START_STEP = 20  # Step index when RD starts affecting dynamics.
 DEFAULT_RD_DT = 0.1  # RD integrator timestep. Forward Euler solver
 DEFAULT_RD_SUBSTEPS = 100  # RD substeps per cell timestep.
 DEFAULT_RD_DU = 0.1  # RD diffusion coefficient for u.
 DEFAULT_RD_DV = 0.2  # RD diffusion coefficient for v.
 # Values inspired by: https://visualpde.com/nonlinear-physics/gray-scott.html
-DEFAULT_GS_F = 0.03  # Gray-Scott parameter a (feed-like term in this formulation).
-DEFAULT_GS_K = 0.062  # Gray-Scott parameter b (kill-like term in this formulation).
+DEFAULT_GS_F = 0.034  # Gray-Scott parameter a (feed-like term in this formulation).
+DEFAULT_GS_K = 0.056 # Gray-Scott parameter b (kill-like term in this formulation).
 DEFAULT_RD_MODEL = "gray_scott"  # RD kinetics model; options: gray_scott.
-DEFAULT_RD_CLAMP = True  # Clamp RD fields to [0,1] each substep.
+DEFAULT_RD_CLAMP = False  # Clamp RD fields to [0,1] each substep.
 DEFAULT_RD_NOISE = 0.0  # Additive RD noise amplitude.
-DEFAULT_RD_INIT_MODE = "seed_random_cells"  # RD seeding mode; options: uniform_noise, seed_center, seed_random_cells, gradient_direction.
+DEFAULT_RD_INIT_MODE = "seed_center"  # RD seeding mode; options: uniform_noise, seed_center, seed_random_cells, gradient_direction.
 DEFAULT_RD_SEED_AMP = 1.0  # RD seed perturbation amplitude.
-DEFAULT_RD_SEED_FRAC = 0.1  # Fraction of seeded cells in seed_random_cells mode.
+DEFAULT_RD_SEED_FRAC = 0.05  # Fraction of seeded cells for seed_center and seed_random_cells modes.
 DEFAULT_RD_GRADIENT_DIRECTION = "1,0,0"  # Axis for gradient_direction RD init, formatted as 'x,y,z'.
-DEFAULT_RD_GRADIENT_MIN = 0.5  # Minimum u=v value at the low end of the RD gradient.
+DEFAULT_RD_GRADIENT_MIN = 0.0  # Minimum u=v value at the low end of the RD gradient.
 DEFAULT_RD_GRADIENT_MAX = 1.0  # Maximum u=v value at the high end of the RD gradient.
 DEFAULT_RD_SUMMARY_EVERY = 10  # RD summary print interval in steps; 0 disables.
 DEFAULT_RD_PRINT_STATS_EVERY = DEFAULT_RD_SUMMARY_EVERY  # Backward-compatible alias for RD summary interval.
 DEFAULT_RD_DIRECTION_MODE = False  # Map RD signal to division program scalar.
 DEFAULT_RD_DIRECTION = "radial"  # Direction target; options: radial, tangential.
 DEFAULT_RD_DIRECTION_RADIAL_SIGN = "outward"  # Radial sign for RD prog-driven blend; options: outward, inward, random.
-DEFAULT_RD_DIRECTION_BOOST = 5.0  # Strength of u->direction-weight mapping (higher = sharper high-mode enforcement).
-DEFAULT_RD_DIRECTION_CENTER = 0.2  # u center where direction weight crosses 0.5.
+DEFAULT_RD_DIRECTION_BOOST = 1.0  # Strength of u->direction-weight mapping (higher = sharper high-mode enforcement).
+DEFAULT_RD_DIRECTION_CENTER = 0.01  # u center where direction weight crosses 0.5.
 DEFAULT_RD_AFFECTS_DIVISION = True  # Let RD modulate division probability/direction; disable to run RD passively.
 DEFAULT_DIVIDE_BASE_P = 0.0  # Baseline division probability before RD boost.
-DEFAULT_RD_DIVIDE_BOOST = 5  # Strength of RD-driven division boost.
+DEFAULT_RD_DIVIDE_BOOST = 1  # Strength of RD-driven division boost.
 DEFAULT_RD_DIVIDE_CENTER = 0.2  # RD center for division boost response.
 DEFAULT_RD_DIVIDE_MIN_P = 0.0  # Lower cap for RD-driven division probability.
 DEFAULT_RD_DIVIDE_MAX_P = 1.0  # Upper cap for RD-driven division probability.
 DEFAULT_RD_APOPTOSIS_BOOST = 0  # Strength of RD-driven apoptosis boost.
 DEFAULT_RD_APOPTOSIS_BASE_P = 0.0  # Baseline RD apoptosis probability.
-DEFAULT_RD_APOPTOSIS_CENTER = 0.025  # RD center for apoptosis boost response.
+DEFAULT_RD_APOPTOSIS_CENTER = 0.2  # RD center for apoptosis boost response.
 DEFAULT_RD_APOPTOSIS_MIN_P = 0.0  # Lower cap for RD-driven apoptosis probability.
-DEFAULT_RD_APOPTOSIS_MAX_P = 0.5  # Upper cap for RD-driven apoptosis probability.
-DEFAULT_RD_INTERIOR_PROTECTION = False  # Enable interior-protection modifiers for RD gating.
+DEFAULT_RD_APOPTOSIS_MAX_P = 1.0  # Upper cap for RD-driven apoptosis probability.
+DEFAULT_RD_INTERIOR_PROTECTION = True  # Enable interior-protection modifiers for RD gating.
 DEFAULT_RD_INTERIOR_APOPTOSIS_SHIELD = 1.0  # Strength of interior suppression on RD apoptosis.
 DEFAULT_RD_INTERIOR_DIVIDE_DAMP = 1.0  # Strength of interior damping on RD division.
 DEFAULT_RD_INTERIOR_CROWD_WEIGHT = 0.0  # Crowding weight in interior-score computation.
-DEFAULT_SURFACE_ONLY_DIVISION = True  # Restrict division to surface-like cells only.
-DEFAULT_SURFACE_DIVISION_MAX_INTERIOR = 0.25  # Max interior_score allowed to remain eligible for division.
+DEFAULT_SURFACE_ONLY_DIVISION = False # Restrict division to surface-like cells only.
+DEFAULT_SURFACE_DIVISION_MAX_INTERIOR = 0.4 # Max interior_score allowed to remain eligible for division.
 DEFAULT_ENABLE_APOPTOSIS = False  # Enable age-based apoptosis.
 DEFAULT_APOPTOSIS_AGE = 100  # Birth-age threshold for apoptosis.
 
 # Polarity - preferential division axis for cells. Options to align polarity between cells and for RD variables to influence polarity
 #====================================================================================
-DEFAULT_POLARITY_START_STEP = 10  # Step index when polarity dynamics start.
+DEFAULT_POLARITY_START_STEP = 20  # Step index when polarity dynamics start.
 DEFAULT_ENABLE_POLARITY = True # Enable polarity vector dynamics.
-DEFAULT_POLARITY_NOISE = 0.01  # Per-step polarity noise amplitude.
-DEFAULT_POLARITY_ALIGN_ALPHA0 = 0.9  # Baseline polarity neighbor-alignment strength.
-DEFAULT_POLARITY_ALIGN_ALPHA_U = 0.0  # Extra polarity alignment strength scaled by local u.
-DEFAULT_POLARITY_RADIUS: Optional[float] = None  # Polarity neighbor radius (None -> use R_signal).
-DEFAULT_POLARITY_PROJECT_TO_TANGENT = False  # Project polarity updates onto local tangent plane.
+DEFAULT_POLARITY_NOISE = 0.2  # Per-step polarity noise amplitude.
+DEFAULT_POLARITY_ALIGN_ALPHA0 = 0.8 # Baseline polarity neighbor-alignment strength.
+DEFAULT_POLARITY_ALIGN_ALPHA_U = 1.0  # Extra polarity alignment strength scaled by local u.
+DEFAULT_POLARITY_RADIUS: Optional[float] = None # Polarity neighbor radius (None -> use R_signal).
+DEFAULT_POLARITY_PROJECT_TO_TANGENT = True  # Project polarity updates onto local tangent plane.
 DEFAULT_POLARITY_USE_U_GRADIENT = False # Blend an RD-derived direction into polarity update.
 DEFAULT_POLARITY_RD_MODE = "grad_uv"  # RD->polarity mode; options: grad_uv, u_xy_rotation.
 DEFAULT_POLARITY_GRAD_GAIN = 1.0  # Blend gain for graph-gradient contribution to polarity direction.
 DEFAULT_POLARITY_INIT_MODE = "random"  # Polarity initialization mode; options: x_axis, random.
-DEFAULT_POLARITY_MIX_PREV = 1.0 # Temporal inertia of polarity (0=new only, 1=keep previous).
+DEFAULT_POLARITY_MIX_PREV = 0.8 # Temporal inertia of polarity (0=new only, 1=keep previous).
 DEFAULT_FORCE_DIVISION_DIRECTION: Optional[str] = None  # Fixed global division axis as 'x,y,z' string; None disables override.
 
 # The relaxation step (pushing or pulling cells to split_distance) enforces alignment of cells
-DEFAULT_RELAX_PROJECTION_MODE = "none"  # Relaxer displacement projection mode; options: none, force_dir, polarity, polarity_plane.
+DEFAULT_RELAX_PROJECTION_MODE = "polarity"  # Relaxer displacement projection mode; options: none, force_dir, polarity, polarity_plane.
 
 GPU_RAW_KERNELS_SRC = r"""
 __device__ inline float maxf_(const float a, const float b) {
@@ -1093,7 +1093,6 @@ class CellGrowth3D:
         if nrm <= self.eps:
             raise ValueError("rd_gradient_direction norm must be > 0")
         self._rd_gradient_dir_np = (vec / nrm).astype(np.float32, copy=False)
-
         self.points = cp.zeros((1, 3), dtype=self.dtype)
         self.cell_ids = cp.zeros((1,), dtype=cp.int64)
         self.birth_age = cp.zeros((1,), dtype=cp.int32)
@@ -1129,11 +1128,12 @@ class CellGrowth3D:
             self._polarity_reseed_done = True
         self._assert_state_aligned()
         if self.enable_reaction_diffusion:
+            rd_extra = f"F={self.gs_F:g}, k={self.gs_k:g}"
             print(
                 "Reaction-diffusion enabled: "
                 f"model={self.rd_model}, R_signal={self.R_signal:g}, dt={self.rd_dt:g}, "
                 f"substeps={self.rd_substeps}, Du={self.Du:g}, Dv={self.Dv:g}, "
-                f"F={self.gs_F:g}, k={self.gs_k:g}, "
+                f"{rd_extra}, "
                 f"start_step={self.rd_start_step}"
             )
         if self._force_division_dir_np is not None:
@@ -1648,7 +1648,9 @@ class CellGrowth3D:
         elif self.rd_init_mode == "seed_center":
             center = self.points.mean(axis=0)
             d2 = xp_module.sum((self.points - center[None, :]) ** 2, axis=1)
-            idx = self._to_int(xp_module.argmin(d2))
+            center_idx = self._to_int(xp_module.argmin(d2))
+            n_seed = max(1, int(round(self.rd_seed_frac * n)))
+            idx = self._seed_indices_around_anchor(center_idx, n_seed=n_seed)
             self.u[idx] = 1.0
         elif self.rd_init_mode == "seed_random_cells":
             if xp_module is cp:
@@ -1716,7 +1718,9 @@ class CellGrowth3D:
         if self.rd_init_mode == "seed_center":
             center = self.points.mean(axis=0)
             d2 = xp_module.sum((self.points - center[None, :]) ** 2, axis=1)
-            idx = self._to_int(xp_module.argmin(d2))
+            center_idx = self._to_int(xp_module.argmin(d2))
+            n_seed = max(1, int(round(self.rd_seed_frac * n)))
+            idx = self._seed_indices_around_anchor(center_idx, n_seed=n_seed)
             self.u[idx] = 1.0
         elif self.rd_init_mode == "seed_random_cells":
             idx = self._to_int(self._rng.randint(0, n))
@@ -1763,7 +1767,7 @@ class CellGrowth3D:
         self.p = p.astype(self.dtype, copy=False)
 
     def _apply_rd_gradient_init(self) -> None:
-        """Initialize u=v with a large-scale gradient along rd_gradient_direction."""
+        """Initialize RD state with a large-scale gradient along rd_gradient_direction."""
         xp_module = self._xp_of(self.points)
         n = int(self.points.shape[0])
         if n == 0:
@@ -2353,23 +2357,23 @@ class CellGrowth3D:
         substeps = int(self.rd_substeps)
 
         for _ in range(substeps):
-            u_bar, v_bar, _ = self._neighbor_means_two_scalars(points, u, v, radius, grid=use_grid)
+            u_bar, v_bar, _ = self._neighbor_means_two_scalars(
+                points, u, v, radius, grid=use_grid
+            )
             du_diff = self.Du * (u_bar - u)
             dv_diff = self.Dv * (v_bar - v)
+            # VisualPDE form:
+            # du/dt = Du*L(u) + u^2*v - (a+b)*u
+            # dv/dt = Dv*L(v) - u^2*v + a*(1-v)
+            # with a=gs_F and b=gs_k.
+            uuv = u * u * v
+            du_react = uuv - (self.gs_F + self.gs_k) * u
+            dv_react = -uuv + self.gs_F * (1.0 - v)
+            du_rhs = du_diff + du_react
+            dv_rhs = dv_diff + dv_react
 
-            if self.rd_model == "gray_scott":
-                # VisualPDE form:
-                # du/dt = Du*L(u) + u^2*v - (a+b)*u
-                # dv/dt = Dv*L(v) - u^2*v + a*(1-v)
-                # with a=gs_F and b=gs_k.
-                uuv = u * u * v
-                du_react = uuv - (self.gs_F + self.gs_k) * u
-                dv_react = -uuv + self.gs_F * (1.0 - v)
-            else:  # pragma: no cover
-                raise ValueError(f"Unsupported rd_model: {self.rd_model}")
-
-            u = u + dt * (du_diff + du_react)
-            v = v + dt * (dv_diff + dv_react)
+            u = u + dt * du_rhs
+            v = v + dt * dv_rhs
 
             if self.rd_noise > 0:
                 # Each RD substep is an explicit timestep with variance ~dt.
@@ -4263,7 +4267,12 @@ def _build_cli() -> argparse.ArgumentParser:
         help="Initial perturbation mode for RD fields",
     )
     parser.add_argument("--rd-seed-amp", type=float, default=DEFAULT_RD_SEED_AMP, help="RD seed perturbation amplitude")
-    parser.add_argument("--rd-seed-frac", type=float, default=DEFAULT_RD_SEED_FRAC, help="Fraction of seeded cells for rd-init-mode=seed_random_cells")
+    parser.add_argument(
+        "--rd-seed-frac",
+        type=float,
+        default=DEFAULT_RD_SEED_FRAC,
+        help="Fraction of seeded cells for rd-init-mode=seed_center and seed_random_cells",
+    )
     parser.add_argument(
         "--rd-gradient-direction",
         type=str,
@@ -4771,12 +4780,13 @@ def main() -> None:
             err = getattr(sim, "_gpu_kernel_error", None)
             print(f"GPU neighbor/overlap raw kernels: disabled ({err})")
     print(f"Apoptosis: enabled={sim.enable_apoptosis}, age_threshold={sim.apoptosis_age}")
+    rd_model_details = f"F={sim.gs_F:g}, k={sim.gs_k:g}"
     print(
         "Reaction-diffusion: "
         f"enabled={sim.enable_reaction_diffusion}, model={sim.rd_model}, "
         f"R_signal={sim.R_signal:g}, Du={sim.Du:g}, Dv={sim.Dv:g}, "
         f"dt={sim.rd_dt:g}, substeps={sim.rd_substeps}, "
-        f"F={sim.gs_F:g}, k={sim.gs_k:g}, start_step={sim.rd_start_step}"
+        f"{rd_model_details}, start_step={sim.rd_start_step}"
     )
     if sim.enable_reaction_diffusion:
         print(
