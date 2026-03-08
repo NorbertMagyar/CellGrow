@@ -36,7 +36,7 @@ ActionRule = Callable[[cp.ndarray, int], cp.ndarray]
 
 # Main simulation controls
 #==========================================================================
-DEFAULT_STEPS = 200  # Number of simulation timesteps.
+DEFAULT_STEPS = 100  # Number of simulation timesteps.
 DEFAULT_CROWDING_STAY_THRESHOLD = 12  # Neighbor count above which cells stop dividing.
 DEFAULT_CROWDING_DEATH_THRESHOLD = 16  # Neighbor count at/above which cells die.
 DEFAULT_NEIGHBORHOOD_RADIUS_FACTOR = 2.1  # Multiplier for density_radius relative to cell radius.
@@ -67,8 +67,8 @@ DEFAULT_MOVIE_HEIGHT = 860  # Movie frame height (px).
 DEFAULT_MOVIE_SPHERE_THETA = 16  # Sphere theta tessellation in movie rendering.
 DEFAULT_MOVIE_SPHERE_PHI = 16  # Sphere phi tessellation in movie rendering.
 DEFAULT_MOVIE_SHOW_EDGES = False  # Render sphere mesh edges in movies.
-DEFAULT_MOVIE_EDGE_COLOR = "#000000"  # Edge color when movie edges are enabled.
-DEFAULT_MOVIE_EDGE_WIDTH = 0.6  # Edge line width when movie edges are enabled.
+DEFAULT_MOVIE_EDGE_COLOR = "#FFFFFF00"  # Edge color when movie edges are enabled.
+DEFAULT_MOVIE_EDGE_WIDTH = 0.2  # Edge line width when movie edges are enabled.
 DEFAULT_MOVIE_MACRO_BLOCK_SIZE = 16  # MP4 encoder macro block size.
 DEFAULT_MOVIE_DEATH_ANIMATION = "shrink"  # Death animation; options: none, fade, shrink, fade_shrink.
 DEFAULT_TIMING = False  # Print per-step timing breakdown.
@@ -82,18 +82,18 @@ DEFAULT_VIEW_MAX_RENDER_CELLS = 50000  # Max cells rendered in static final view
 # Reaction-Diffusion calculation across cells
 #==============================================================================
 DEFAULT_ENABLE_REACTION_DIFFUSION = True # Enable reaction-diffusion subsystem.
-DEFAULT_RD_START_STEP = 20  # Step index when RD starts affecting dynamics.
+DEFAULT_RD_START_STEP = 30  # Step index when RD starts affecting dynamics.
 DEFAULT_RD_DT = 0.1  # RD integrator timestep. Forward Euler solver
 DEFAULT_RD_SUBSTEPS = 100  # RD substeps per cell timestep.
 DEFAULT_RD_DU = 0.1  # RD diffusion coefficient for u.
 DEFAULT_RD_DV = 0.2  # RD diffusion coefficient for v.
 # Values inspired by: https://visualpde.com/nonlinear-physics/gray-scott.html
-DEFAULT_GS_F = 0.034  # Gray-Scott parameter a (feed-like term in this formulation).
-DEFAULT_GS_K = 0.056 # Gray-Scott parameter b (kill-like term in this formulation).
+DEFAULT_GS_F = 0.026  # Gray-Scott parameter a (feed-like term in this formulation).
+DEFAULT_GS_K = 0.045 # Gray-Scott parameter b (kill-like term in this formulation).
 DEFAULT_RD_MODEL = "gray_scott"  # RD kinetics model; options: gray_scott.
 DEFAULT_RD_CLAMP = False  # Clamp RD fields to [0,1] each substep.
 DEFAULT_RD_NOISE = 0.0  # Additive RD noise amplitude.
-DEFAULT_RD_INIT_MODE = "seed_center"  # RD seeding mode; options: uniform_noise, seed_center, seed_random_cells, gradient_direction.
+DEFAULT_RD_INIT_MODE = "seed_random_cells"  # RD seeding mode; options: uniform_noise, seed_center, seed_random_cells, gradient_direction.
 DEFAULT_RD_SEED_AMP = 1.0  # RD seed perturbation amplitude.
 DEFAULT_RD_SEED_FRAC = 0.05  # Fraction of seeded cells for seed_center and seed_random_cells modes.
 DEFAULT_RD_GRADIENT_DIRECTION = "1,0,0"  # Axis for gradient_direction RD init, formatted as 'x,y,z'.
@@ -108,20 +108,20 @@ DEFAULT_RD_DIRECTION_BOOST = 1.0  # Strength of u->direction-weight mapping (hig
 DEFAULT_RD_DIRECTION_CENTER = 0.01  # u center where direction weight crosses 0.5.
 DEFAULT_RD_AFFECTS_DIVISION = True  # Let RD modulate division probability/direction; disable to run RD passively.
 DEFAULT_DIVIDE_BASE_P = 0.0  # Baseline division probability before RD boost.
-DEFAULT_RD_DIVIDE_BOOST = 1  # Strength of RD-driven division boost.
-DEFAULT_RD_DIVIDE_CENTER = 0.2  # RD center for division boost response.
+DEFAULT_RD_DIVIDE_BOOST = 3.5  # Strength of RD-driven division boost.
+DEFAULT_RD_DIVIDE_CENTER = 0.1  # RD center for division boost response.
 DEFAULT_RD_DIVIDE_MIN_P = 0.0  # Lower cap for RD-driven division probability.
 DEFAULT_RD_DIVIDE_MAX_P = 1.0  # Upper cap for RD-driven division probability.
-DEFAULT_RD_APOPTOSIS_BOOST = 0  # Strength of RD-driven apoptosis boost.
+DEFAULT_RD_APOPTOSIS_BOOST = 1  # Strength of RD-driven apoptosis boost.
 DEFAULT_RD_APOPTOSIS_BASE_P = 0.0  # Baseline RD apoptosis probability.
 DEFAULT_RD_APOPTOSIS_CENTER = 0.2  # RD center for apoptosis boost response.
 DEFAULT_RD_APOPTOSIS_MIN_P = 0.0  # Lower cap for RD-driven apoptosis probability.
-DEFAULT_RD_APOPTOSIS_MAX_P = 1.0  # Upper cap for RD-driven apoptosis probability.
-DEFAULT_RD_INTERIOR_PROTECTION = True  # Enable interior-protection modifiers for RD gating.
+DEFAULT_RD_APOPTOSIS_MAX_P = 0.5  # Upper cap for RD-driven apoptosis probability.
+DEFAULT_RD_INTERIOR_PROTECTION = False  # Enable interior-protection modifiers for RD gating.
 DEFAULT_RD_INTERIOR_APOPTOSIS_SHIELD = 1.0  # Strength of interior suppression on RD apoptosis.
 DEFAULT_RD_INTERIOR_DIVIDE_DAMP = 1.0  # Strength of interior damping on RD division.
 DEFAULT_RD_INTERIOR_CROWD_WEIGHT = 0.0  # Crowding weight in interior-score computation.
-DEFAULT_SURFACE_ONLY_DIVISION = False # Restrict division to surface-like cells only.
+DEFAULT_SURFACE_ONLY_DIVISION = True # Restrict division to surface-like cells only.
 DEFAULT_SURFACE_DIVISION_MAX_INTERIOR = 0.4 # Max interior_score allowed to remain eligible for division.
 DEFAULT_ENABLE_APOPTOSIS = False  # Enable age-based apoptosis.
 DEFAULT_APOPTOSIS_AGE = 100  # Birth-age threshold for apoptosis.
@@ -129,7 +129,7 @@ DEFAULT_APOPTOSIS_AGE = 100  # Birth-age threshold for apoptosis.
 # Polarity - preferential division axis for cells. Options to align polarity between cells and for RD variables to influence polarity
 #====================================================================================
 DEFAULT_POLARITY_START_STEP = 20  # Step index when polarity dynamics start.
-DEFAULT_ENABLE_POLARITY = True # Enable polarity vector dynamics.
+DEFAULT_ENABLE_POLARITY = False # Enable polarity vector dynamics.
 DEFAULT_POLARITY_NOISE = 0.2  # Per-step polarity noise amplitude.
 DEFAULT_POLARITY_ALIGN_ALPHA0 = 0.8 # Baseline polarity neighbor-alignment strength.
 DEFAULT_POLARITY_ALIGN_ALPHA_U = 1.0  # Extra polarity alignment strength scaled by local u.
@@ -143,7 +143,7 @@ DEFAULT_POLARITY_MIX_PREV = 0.8 # Temporal inertia of polarity (0=new only, 1=ke
 DEFAULT_FORCE_DIVISION_DIRECTION: Optional[str] = None  # Fixed global division axis as 'x,y,z' string; None disables override.
 
 # The relaxation step (pushing or pulling cells to split_distance) enforces alignment of cells
-DEFAULT_RELAX_PROJECTION_MODE = "polarity"  # Relaxer displacement projection mode; options: none, force_dir, polarity, polarity_plane.
+DEFAULT_RELAX_PROJECTION_MODE = "none"  # Relaxer displacement projection mode; options: none, force_dir, polarity, polarity_plane.
 
 GPU_RAW_KERNELS_SRC = r"""
 __device__ inline float maxf_(const float a, const float b) {
@@ -3010,7 +3010,7 @@ class CellGrowth3D:
                 u_signal = cp.clip(self.u.astype(self.dtype, copy=False), 0.0, 1.0)
                 p_apop = cp.clip(
                     self.rd_apoptosis_base_p
-                    + self.rd_apoptosis_boost * (self.rd_apoptosis_center - u_signal),
+                    + self.rd_apoptosis_boost * (- self.rd_apoptosis_center + u_signal),
                     self.rd_apoptosis_min_p,
                     self.rd_apoptosis_max_p,
                 )
@@ -3041,7 +3041,7 @@ class CellGrowth3D:
             p_min = float(self.rd_divide_min_p)
             p_max = float(self.rd_divide_max_p)
             p_divide = cp.clip(
-                self.rd_divide_base_p + self.rd_divide_boost * (u_signal - self.rd_divide_center),
+                self.rd_divide_base_p + self.rd_divide_boost * (-u_signal + self.rd_divide_center),
                 p_min,
                 p_max,
             )
@@ -3670,6 +3670,10 @@ class CellGrowth3D:
             if color_by == "age":
                 lo = 0.0
                 hi = max(1.0, float(scalar_range_max))
+            elif color_by in {"u", "prog"}:
+                # Lift lower bound so u=0 is not mapped to the darkest colormap end.
+                lo = -0.5
+                hi = max(1.0, float(scalar_range_max))
             else:
                 lo = float(scalar_range_min)
                 hi = float(scalar_range_max)
@@ -3747,7 +3751,7 @@ class CellGrowth3D:
             float(mins[2]),
             float(maxs[2]),
         )
-        view_dir = np.array([1.0, 1.0, 1.0], dtype=float)
+        view_dir = np.array([0.0, 1.0, 0.0], dtype=float)
         view_dir /= np.linalg.norm(view_dir)
         cam_distance = max(4.0 * fit_radius, 1.0)
         camera_position = [
@@ -3820,6 +3824,12 @@ class CellGrowth3D:
                 valid[matched] = True
             return out, valid
 
+        # Movie-only material tuning: stronger specular highlights for shinier spheres.
+        movie_ambient = 0.20
+        movie_diffuse = 0.72
+        movie_specular = 0.5
+        movie_specular_power = 30.0
+
         def write_frame(
             points_np: np.ndarray,
             order_np: np.ndarray,
@@ -3883,10 +3893,10 @@ class CellGrowth3D:
                         opacity=point_opacity,
                         lighting=True,
                         smooth_shading=True,
-                        ambient=0.12,
-                        diffuse=0.78,
-                        specular=0.22,
-                        specular_power=18.0,
+                        ambient=movie_ambient,
+                        diffuse=movie_diffuse,
+                        specular=movie_specular,
+                        specular_power=movie_specular_power,
                         show_edges=show_edges,
                         edge_color=edge_color,
                         line_width=edge_width,
@@ -3901,10 +3911,10 @@ class CellGrowth3D:
                         opacity=point_opacity,
                         lighting=True,
                         smooth_shading=True,
-                        ambient=0.12,
-                        diffuse=0.78,
-                        specular=0.22,
-                        specular_power=18.0,
+                        ambient=movie_ambient,
+                        diffuse=movie_diffuse,
+                        specular=movie_specular,
+                        specular_power=movie_specular_power,
                         show_edges=show_edges,
                         edge_color=edge_color,
                         line_width=edge_width,
@@ -3919,10 +3929,10 @@ class CellGrowth3D:
                         opacity=point_opacity,
                         lighting=True,
                         smooth_shading=True,
-                        ambient=0.12,
-                        diffuse=0.78,
-                        specular=0.22,
-                        specular_power=18.0,
+                        ambient=movie_ambient,
+                        diffuse=movie_diffuse,
+                        specular=movie_specular,
+                        specular_power=movie_specular_power,
                         show_edges=show_edges,
                         edge_color=edge_color,
                         line_width=edge_width,
@@ -3937,10 +3947,10 @@ class CellGrowth3D:
                         opacity=point_opacity,
                         lighting=True,
                         smooth_shading=True,
-                        ambient=0.12,
-                        diffuse=0.78,
-                        specular=0.22,
-                        specular_power=18.0,
+                        ambient=movie_ambient,
+                        diffuse=movie_diffuse,
+                        specular=movie_specular,
+                        specular_power=movie_specular_power,
                         show_edges=show_edges,
                         edge_color=edge_color,
                         line_width=edge_width,
